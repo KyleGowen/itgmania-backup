@@ -152,6 +152,45 @@ function Get-SongsPackListMarkdown {
     return $lineList -join "`n"
 }
 
+function Test-CronPartMatch {
+    param([string]$Part, [int]$Value, [int]$Min, [int]$Max)
+    if ($Part -eq '*') { return $true }
+    if ($Part -match '^\d+$') { return [int]$Part -eq $Value }
+    if ($Part -match '^\*/(\d+)$') { $step = [int]$Matches[1]; return ($Value % $step) -eq 0 }
+    if ($Part -match '^(\d+)-(\d+)$') { $a = [int]$Matches[1]; $b = [int]$Matches[2]; return $Value -ge $a -and $Value -le $b }
+    return $false
+}
+
+function Get-NextCronRun {
+    param([string]$Cron, [string]$Timezone)
+    if ([string]::IsNullOrWhiteSpace($Cron)) { return $null }
+    $parts = $Cron -split '\s+'
+    if ($parts.Count -lt 5) { return $null }
+    $tzName = if ([string]::IsNullOrWhiteSpace($Timezone)) { "Pacific Standard Time" } else { $Timezone }
+    try {
+        $tz = [System.TimeZoneInfo]::FindSystemTimeZoneById($tzName)
+    } catch {
+        return $null
+    }
+    $nowUtc = (Get-Date).ToUniversalTime()
+    $nowInTz = [System.TimeZoneInfo]::ConvertTimeFromUtc($nowUtc, $tz)
+    $maxMinutes = 8 * 24 * 60
+    for ($m = 1; $m -le $maxMinutes; $m++) {
+        $candidate = $nowInTz.AddMinutes($m)
+        $minuteMatch = Test-CronPartMatch -Part $parts[0] -Value $candidate.Minute -Min 0 -Max 59
+        $hourMatch = Test-CronPartMatch -Part $parts[1] -Value $candidate.Hour -Min 0 -Max 23
+        $dayMatch = Test-CronPartMatch -Part $parts[2] -Value $candidate.Day -Min 1 -Max 31
+        $monthMatch = Test-CronPartMatch -Part $parts[3] -Value $candidate.Month -Min 1 -Max 12
+        $dow = [int]$candidate.DayOfWeek
+        $dowMatch = Test-CronPartMatch -Part $parts[4] -Value $dow -Min 0 -Max 7
+        if (-not $dowMatch -and $dow -eq 0 -and $parts[4] -eq '7') { $dowMatch = $true }
+        if ($minuteMatch -and $hourMatch -and $dayMatch -and $monthMatch -and $dowMatch) {
+            return $candidate
+        }
+    }
+    return $null
+}
+
 function Invoke-Backup {
     $config = Get-Config
     $gitExe = Get-GitExe
@@ -384,15 +423,20 @@ function Invoke-Backup {
             )
             $defaultExplanation = 'Backed up file.'
             $readmePath = Join-Path $StagingDir "README.md"
-            $backupTime = Get-Date -Format 'yyyy-MM-dd HH:mm'
-            if ([string]::IsNullOrEmpty([string]$backupTime)) { $backupTime = "unknown" }
+            $backupDateTime = Get-Date
+            $backupTimeDisplay = $backupDateTime.ToString("MMM d, yyyy 'at' h:mm tt")
+            if ([string]::IsNullOrWhiteSpace($backupTimeDisplay)) { $backupTimeDisplay = "unknown" }
+            $nextRun = Get-NextCronRun -Cron $config.ScheduleCron -Timezone $config.ScheduleTimezone
+            $nextBackupDisplay = if ($nextRun) { $nextRun.ToString("MMM d, yyyy 'at' h:mm tt") } else { "unknown" }
             $fence = '```'
             if ([string]::IsNullOrEmpty([string]$fence)) { $fence = '```' }
             $readmeLines = New-Object System.Collections.ArrayList
             if ($null -eq $readmeLines) { $readmeLines = [System.Collections.ArrayList]::new() }
             [void]$readmeLines.Add("# ITGMania Backup")
             [void]$readmeLines.Add("")
-            [void]$readmeLines.Add("Last backup: " + [string]$backupTime)
+            [void]$readmeLines.Add("#### Last backup: " + [string]$backupTimeDisplay)
+            [void]$readmeLines.Add("")
+            [void]$readmeLines.Add("#### Next backup: " + [string]$nextBackupDisplay)
             [void]$readmeLines.Add("")
             [void]$readmeLines.Add("## Changes since last backup")
             [void]$readmeLines.Add("")
@@ -400,6 +444,22 @@ function Invoke-Backup {
                 [void]$readmeLines.Add("No file changes since last backup.")
             } else {
                 foreach ($relPath in $changedFiles) {
+                    $perFileDiffOut = if ($hasHead) { & $gitExe diff --cached HEAD -- $relPath 2>&1 } else { & $gitExe diff --cached -- $relPath 2>&1 }
+                    $perFileDiffParts = [System.Collections.ArrayList]::new()
+                    if ($null -ne $perFileDiffOut) { foreach ($o in $perFileDiffOut) { $t = ""; if ($null -ne $o) { try { $t = [string]$o } catch { } }; if ($null -eq $t) { $t = "" }; [void]$perFileDiffParts.Add($t) } }
+                    $perFileDiffText = ($perFileDiffParts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join "`n"
+                    if ([string]::IsNullOrWhiteSpace($perFileDiffText)) { $perFileDiffText = "(no diff)" }
+                    # Omit PACK_LIST.md entirely when the only change is the "Generated from InstallPath on DATE" line
+                    $skipEntireSection = $false
+                    if ($relPath -like '*PACK_LIST.md' -and -not [string]::IsNullOrWhiteSpace($perFileDiffText) -and $perFileDiffText -ne "(no diff)") {
+                        $diffLines = ($perFileDiffText -split "`r?`n")
+                        $minusLines = @($diffLines | Where-Object { $_ -match '^-' -and $_ -notmatch '^--- ' })
+                        $plusLines = @($diffLines | Where-Object { $_ -match '^\+' -and $_ -notmatch '^\+\+\+ ' })
+                        $onlyDateMinus = ($minusLines.Count -eq 1) -and ($minusLines[0] -match 'Generated from InstallPath on .+\.')
+                        $onlyDatePlus = ($plusLines.Count -eq 1) -and ($plusLines[0] -match 'Generated from InstallPath on .+\.')
+                        if ($onlyDateMinus -and $onlyDatePlus) { $skipEntireSection = $true }
+                    }
+                    if ($skipEntireSection) { continue }
                     $explanation = $defaultExplanation
                     foreach ($pair in $fileExplanationPairs) {
                         if ($relPath -like $pair[0]) { $explanation = $pair[1]; break }
@@ -408,11 +468,6 @@ function Invoke-Backup {
                     [void]$readmeLines.Add("")
                     [void]$readmeLines.Add([string]$explanation)
                     [void]$readmeLines.Add("")
-                    $perFileDiffOut = if ($hasHead) { & $gitExe diff --cached HEAD -- $relPath 2>&1 } else { & $gitExe diff --cached -- $relPath 2>&1 }
-                    $perFileDiffParts = [System.Collections.ArrayList]::new()
-                    if ($null -ne $perFileDiffOut) { foreach ($o in $perFileDiffOut) { $t = ""; if ($null -ne $o) { try { $t = [string]$o } catch { } }; if ($null -eq $t) { $t = "" }; [void]$perFileDiffParts.Add($t) } }
-                    $perFileDiffText = ($perFileDiffParts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join "`n"
-                    if ([string]::IsNullOrWhiteSpace($perFileDiffText)) { $perFileDiffText = "(no diff)" }
                     [void]$readmeLines.Add([string]$fence + "diff")
                     $perFileDiffLines = ([string]$perFileDiffText) -split "`n"
                     foreach ($ln in $perFileDiffLines) {
