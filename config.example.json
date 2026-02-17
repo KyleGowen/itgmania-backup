@@ -1,0 +1,17 @@
+{
+  "InstallPath": "C:\\Games\\ITGMania",
+  "SavePathPortable": null,
+  "SavePathAppData": null,
+  "BackupRepoUrl": "https://github.com/KyleGowen/Thraximundar-Backup.git",
+  "BackupRepoAccessToken": "YOUR_GITHUB_PAT_OR_ACCESS_TOKEN",
+  "ScheduleCron": "*/10 * * * *",
+  "ScheduleTimezone": "Pacific Standard Time",
+  "BackupSongs": false,
+  "InstallDirSubdirs": ["Themes", "NoteSkins", "BGAnimations", "Characters", "Courses", "Logs"],
+  "Tasks": [
+    {
+      "Name": "ITGMania",
+      "TargetSubpath": "ITGMania"
+    }
+  ]
+}

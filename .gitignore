@@ -1,0 +1,9 @@
+# Do not commit config with real tokens
+config.json
+
+# Staging directory (backup clone)
+repo/
+
+# Logs (if anyone runs backup from repo dir)
+Logs/
+*.log

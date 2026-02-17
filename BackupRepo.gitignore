@@ -1,0 +1,28 @@
+# Used when building the backup destination repo (staging).
+# Copy this into the staging dir as .gitignore. Never back up Songs or large media.
+
+# Songs / music (never back up)
+Songs/
+AdditionalSongs/
+**/Songs/
+**/AdditionalSongs/
+
+# Cache (rebuildable)
+Cache/
+**/Cache/
+
+# Large media by extension (GitHub 100 MB limit)
+*.mp3
+*.ogg
+*.wav
+*.flac
+*.mp4
+*.mkv
+*.avi
+*.m4a
+*.webm
+
+# Optional: uncomment to exclude more
+# Logs/
+# Screenshots/
+# Save/Upload/
