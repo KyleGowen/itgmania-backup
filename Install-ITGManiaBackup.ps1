@@ -9,7 +9,12 @@
   Creates a user-level scheduled task (CronRunner every minute) and a desktop shortcut for "Run backup now".
 .NOTES
   No administrator required. The backup destination repo is separate from the repo containing this code. Do not commit config with real tokens.
+  Use -ConfigPath to force a specific config file (e.g. from your project folder); it will be copied to the install root.
 #>
+
+param(
+    [string]$ConfigPath = $null
+)
 
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -29,49 +34,101 @@ try {
 $TaskName = "ITGManiaBackup"
 $ShortcutName = "ITGMania Backup Now.lnk"
 
-# --- Wizard ---
+# --- Look for existing config: -ConfigPath wins, then script dir, then install root ---
+$configPath = $null
+$scriptDirConfig = Join-Path $ScriptDir "config.json"
+$installRootConfig = Join-Path $InstallRoot "config.json"
+if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {
+    $configPath = (Resolve-Path -LiteralPath $ConfigPath).Path
+} elseif (Test-Path -LiteralPath $scriptDirConfig) {
+    $configPath = (Resolve-Path -LiteralPath $scriptDirConfig).Path
+} elseif (Test-Path -LiteralPath $installRootConfig) {
+    $configPath = (Resolve-Path -LiteralPath $installRootConfig).Path
+}
+
 Write-Host "=== ITGMania Backup Installer ===" -ForegroundColor Cyan
 Write-Host "Install location: $InstallRoot`n" -ForegroundColor Gray
 
-$installPath = Read-Host "ITGMania install path (default: C:\Games\ITGMania)"
-if ([string]::IsNullOrWhiteSpace($installPath)) { $installPath = "C:\Games\ITGMania" }
-$installPath = $installPath.TrimEnd('\')
+if ($configPath) {
+    Write-Host "Found config: $configPath" -ForegroundColor Green
+    $configJson = Get-Content -Raw -LiteralPath $configPath
+    $config = $configJson | ConvertFrom-Json
+    # Always write this config to install root so the task and shortcut use it
+    $installRootConfigPath = Join-Path $InstallRoot "config.json"
+    New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+    Set-Content -Path $installRootConfigPath -Value $configJson -Encoding UTF8
+    Write-Host "Config written to install location." -ForegroundColor Gray
+    $configPath = $installRootConfigPath
+    # Display config with access keys obscured
+    $obscureKeys = @('BackupRepoAccessToken', 'Token', 'Secret', 'Password')
+    Write-Host "`nConfiguration in use:" -ForegroundColor Cyan
+    if (-not $config) {
+        Write-Host "  (config empty or invalid)" -ForegroundColor Yellow
+    } else {
+        $props = $config.PSObject.Properties
+        if (-not $props -or $props.Count -eq 0) {
+            $props = $config | Get-Member -MemberType NoteProperty
+        }
+        foreach ($p in $props) {
+            $key = if ($p.Name) { $p.Name } else { $p.Key }
+            $val = if ($null -ne $p.Value) { $p.Value } else { $config.($p.Name) }
+            $obscure = $obscureKeys | Where-Object { $key -match $_ }
+            if ($obscure -and $val) {
+                $displayVal = "******"
+            } elseif ($null -eq $val) {
+                $displayVal = "(null)"
+            } elseif ($val -is [System.Collections.IEnumerable] -and $val -isnot [string]) {
+                $displayVal = "($($val.Count) items)"
+            } elseif ($val -is [PSCustomObject]) {
+                $displayVal = "{ ... }"
+            } else {
+                $displayVal = $val.ToString()
+            }
+            Write-Host "  $key = $displayVal"
+        }
+    }
+    Write-Host ""
+} else {
+    # --- Wizard (no config found) ---
+    $installPath = Read-Host "ITGMania install path (default: C:\Games\ITGMania)"
+    if ([string]::IsNullOrWhiteSpace($installPath)) { $installPath = "C:\Games\ITGMania" }
+    $installPath = $installPath.TrimEnd('\')
 
-$defaultRepoUrl = "https://github.com/KyleGowen/Thraximundar-Backup.git"
-$backupRepoUrl = Read-Host "Backup destination repo URL (default: $defaultRepoUrl)"
-if ([string]::IsNullOrWhiteSpace($backupRepoUrl)) { $backupRepoUrl = $defaultRepoUrl }
-if (-not $backupRepoUrl.EndsWith(".git")) {
-    $backupRepoUrl = $backupRepoUrl.TrimEnd('/') + ".git"
+    $defaultRepoUrl = "https://github.com/KyleGowen/Thraximundar-Backup.git"
+    $backupRepoUrl = Read-Host "Backup destination repo URL (default: $defaultRepoUrl)"
+    if ([string]::IsNullOrWhiteSpace($backupRepoUrl)) { $backupRepoUrl = $defaultRepoUrl }
+    if (-not $backupRepoUrl.EndsWith(".git")) {
+        $backupRepoUrl = $backupRepoUrl.TrimEnd('/') + ".git"
+    }
+
+    $token = Read-Host "GitHub access token (PAT) for push - will be stored in config" -AsSecureString
+    $tokenPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($token))
+
+    $scheduleCron = Read-Host "Schedule (cron 5-field, default: */10 * * * * = every 10 min)"
+    if ([string]::IsNullOrWhiteSpace($scheduleCron)) { $scheduleCron = "*/10 * * * *" }
+
+    $scheduleTz = Read-Host "Timezone (default: Pacific Standard Time)"
+    if ([string]::IsNullOrWhiteSpace($scheduleTz)) { $scheduleTz = "Pacific Standard Time" }
+
+    # --- Write config ---
+    $config = @{
+        InstallPath           = $installPath
+        SavePathPortable      = $null
+        SavePathAppData       = $null
+        BackupRepoUrl         = $backupRepoUrl
+        BackupRepoAccessToken = $tokenPlain
+        ScheduleCron          = $scheduleCron
+        ScheduleTimezone      = $scheduleTz
+        BackupSongs           = $false
+        InstallDirSubdirs     = @("Themes", "NoteSkins", "BGAnimations", "Characters", "Courses", "Logs")
+        Tasks                 = @(@{ Name = "ITGMania"; TargetSubpath = "ITGMania" })
+    }
+    $configJson = $config | ConvertTo-Json -Depth 4
+    New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+    $configPath = Join-Path $InstallRoot "config.json"
+    Set-Content -Path $configPath -Value $configJson -Encoding UTF8
+    Write-Host "`nConfig written to $configPath" -ForegroundColor Green
 }
-
-$token = Read-Host "GitHub access token (PAT) for push - will be stored in config" -AsSecureString
-$tokenPlain = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($token))
-
-$scheduleCron = Read-Host "Schedule (cron 5-field, default: */10 * * * * = every 10 min)"
-if ([string]::IsNullOrWhiteSpace($scheduleCron)) { $scheduleCron = "*/10 * * * *" }
-
-$scheduleTz = Read-Host "Timezone (default: Pacific Standard Time)"
-if ([string]::IsNullOrWhiteSpace($scheduleTz)) { $scheduleTz = "Pacific Standard Time" }
-
-# --- Write config ---
-$config = @{
-    InstallPath           = $installPath
-    SavePathPortable      = $null
-    SavePathAppData       = $null
-    BackupRepoUrl         = $backupRepoUrl
-    BackupRepoAccessToken = $tokenPlain
-    ScheduleCron          = $scheduleCron
-    ScheduleTimezone      = $scheduleTz
-    BackupSongs           = $false
-    InstallDirSubdirs     = @("Themes", "NoteSkins", "BGAnimations", "Characters", "Courses", "Logs")
-    Tasks                 = @(@{ Name = "ITGMania"; TargetSubpath = "ITGMania" })
-}
-$configJson = $config | ConvertTo-Json -Depth 4
-
-New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-$configPath = Join-Path $InstallRoot "config.json"
-Set-Content -Path $configPath -Value $configJson -Encoding UTF8
-Write-Host "`nConfig written to $configPath" -ForegroundColor Green
 
 # --- Copy scripts ---
 $files = @("Backup-ITGMania.ps1", "CronRunner.ps1", "BackupRepo.gitignore")

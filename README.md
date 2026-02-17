@@ -28,16 +28,59 @@ Backs up ITGMania install and save data to a GitHub repo on a configurable sched
 
 ## Config
 
-After install, config is at `%ProgramData%\ITGManiaBackup\config.json`. It contains your **access token**—do not commit or share this file. You can edit it to change paths, cron, or add tasks.
+Config is JSON. It contains your **BackupRepoAccessToken** (GitHub PAT)—do not commit or share the file. `config.json` is listed in `.gitignore`.
 
-Example structure (see `config.example.json`):
+### Where config can live
 
-- `InstallPath` – ITGMania install directory
-- `BackupRepoUrl` – Backup destination repo (HTTPS)
-- `BackupRepoAccessToken` – GitHub PAT for push
-- `ScheduleCron` – 5-field cron (minute hour day month weekday)
-- `ScheduleTimezone` – e.g. "Pacific Standard Time"
-- `InstallDirSubdirs` – Whitelist from install (Themes, NoteSkins, Logs, etc.). **Songs are never included.**
+| Style | Location | Used by |
+|-------|----------|--------|
+| **Script-level** | `config.json` in the **same folder** as `Backup-ITGMania.ps1` (e.g. `Desktop\ITGMania Backup\config.json`) | Backup script (when no `-ConfigPath` is passed). Installer copies it to the install root if found there. |
+| **Install root** | `%ProgramData%\ITGManiaBackup\config.json` or `%LOCALAPPDATA%\ITGManiaBackup\config.json` | Backup script and scheduled task. This is where the installer writes config. |
+| **Explicit path** | Any path you pass on the command line | Backup script only: `.\Backup-ITGMania.ps1 -ConfigPath "D:\MyConfigs\backup.json"` |
+
+**Backup script resolution order** (when you don’t pass `-ConfigPath`):
+
+1. `-ConfigPath` (if provided)
+2. `config.json` in the backup script’s directory
+3. `config.json` in ProgramData, then script dir, then LocalAppData
+
+**Installer behavior:**
+
+- If the installer finds `config.json` in the install root or in its own folder, it **does not prompt** for install path, repo URL, token, or schedule. It prefers the install root config when both exist so "Configuration in use" matches what the task and shortcut use. It shows **“Found config: &lt;path&gt;”**, prints the configuration in use (with **BackupRepoAccessToken** and any token/secret/password fields shown as `******`), then continues to copy scripts and create the task/shortcut.
+- If no config is found, it runs the full wizard and writes `config.json` to the install root.
+
+**Changing the schedule:** The scheduled task and shortcut read **only** the config in the install root (`%ProgramData%\ITGManiaBackup\config.json` or `%LOCALAPPDATA%\ITGManiaBackup\config.json`). To change `ScheduleCron` or `ScheduleTimezone`, edit that file and save. To push an updated schedule from the script folder, run the installer again with the updated `config.json` there (if install root has no config, the installer will copy it).
+
+### Config structure
+
+Copy `config.example.json` to `config.json` and fill in your paths and token. Required: `InstallPath`, `BackupRepoUrl`. Optional: `BackupRepoAccessToken` (for private repos or to avoid auth prompts).
+
+| Key | Description |
+|-----|-------------|
+| `InstallPath` | ITGMania install directory (e.g. `C:\Games\ITGMania`) |
+| `BackupRepoUrl` | Backup destination repo, HTTPS (e.g. `https://github.com/You/YourBackup.git`) |
+| `BackupRepoAccessToken` | GitHub PAT with repo push permission. **Obscured when the installer displays config.** |
+| `ScheduleCron` | 5-field cron: minute hour day-of-month month weekday (e.g. `0 2 * * *` = 2am daily) |
+| `ScheduleTimezone` | e.g. `Pacific Standard Time` |
+| `SavePathPortable`, `SavePathAppData` | Usually `null`; script derives save paths from `InstallPath` and `%APPDATA%` |
+| `BackupSongs` | `false`; do not set to `true` for GitHub |
+| `InstallDirSubdirs` | Whitelist from install: Themes, NoteSkins, BGAnimations, Characters, Courses, Logs. **Songs are never included.** |
+| `Tasks` | List of `{ "Name": "ITGMania", "TargetSubpath": "ITGMania" }` for mapping into the backup repo |
+
+Example (see `config.example.json`):
+
+```json
+{
+  "InstallPath": "C:\\Games\\ITGMania",
+  "BackupRepoUrl": "https://github.com/You/YourBackup.git",
+  "BackupRepoAccessToken": "YOUR_GITHUB_PAT",
+  "ScheduleCron": "0 2 * * *",
+  "ScheduleTimezone": "Pacific Standard Time",
+  "BackupSongs": false,
+  "InstallDirSubdirs": ["Themes", "NoteSkins", "BGAnimations", "Characters", "Courses", "Logs"],
+  "Tasks": [{ "Name": "ITGMania", "TargetSubpath": "ITGMania" }]
+}
+```
 
 ## What gets backed up
 

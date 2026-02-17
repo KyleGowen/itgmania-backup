@@ -21,6 +21,11 @@ $MaxFileSizeBytes = 100 * 1024 * 1024   # 100 MB (GitHub limit)
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProgramDataRoot = Join-Path $env:ProgramData "ITGManiaBackup"
 $LocalAppDataRoot = Join-Path $env:LOCALAPPDATA "ITGManiaBackup"
+# If no -ConfigPath was passed, use config.json in the script directory if it exists
+if (-not $ConfigPath) {
+    $scriptLevelConfig = Join-Path $ScriptDir "config.json"
+    if (Test-Path -LiteralPath $scriptLevelConfig) { $ConfigPath = $scriptLevelConfig }
+}
 if ($ConfigPath -and (Test-Path $ConfigPath)) {
     $InstallRoot = Split-Path -Parent $ConfigPath
 } elseif (Test-Path (Join-Path $ProgramDataRoot "config.json")) {
@@ -342,8 +347,9 @@ function Invoke-Backup {
             if ($crlfWarnCount -gt 0) { Write-Log "Git normalized line endings for $crlfWarnCount file(s)." }
             if ($LASTEXITCODE -ne 0) {
                 Write-Log "git add -A failed (e.g. missing file or path too long). Retrying with add . only." -Level INFO
-                $null = & $gitExe @('-C', $StagingDir, 'reset', 'HEAD') 2>&1
-                $addOut2 = & $gitExe @('-C', $StagingDir, 'add', '.') 2>&1
+                Set-Location -LiteralPath $StagingDir
+                $null = & $gitExe reset HEAD 2>&1
+                $addOut2 = & $gitExe add . 2>&1
                 foreach ($line in $addOut2) {
                     $m = if ($null -eq $line) { "" } else { try { [string]$line } catch { "" } }
                     if ([string]::IsNullOrEmpty($m) -or $m -match 'LF will be replaced by CRLF') { continue }
