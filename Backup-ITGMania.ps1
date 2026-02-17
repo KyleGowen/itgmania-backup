@@ -169,11 +169,32 @@ function Invoke-Backup {
     Write-Log "Starting backup. InstallPath=$installPath"
 
     if (Test-Path $StagingDir) {
-        Remove-Item -Path $StagingDir -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path $StagingDir) {
-            cmd /c "rmdir /s /q `"$StagingDir`""
+        $stagingToRemove = $StagingDir.TrimEnd('\')
+        Remove-Item -LiteralPath $stagingToRemove -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $stagingToRemove) {
+            cmd /c "rmdir /s /q `"$stagingToRemove`""
         }
-        if (Test-Path $StagingDir) {
+        if (Test-Path -LiteralPath $stagingToRemove) {
+            Write-Log "Standard delete failed. Using robocopy mirror to clear staging dir." -Level INFO
+            $emptyDir = Join-Path $env:TEMP "ITGManiaBackupEmpty_$(Get-Random)"
+            New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
+            try {
+                $null = & robocopy $emptyDir $stagingToRemove /mir /r:2 /w:2 /nfl /ndl /njh /njs 2>&1
+                Start-Sleep -Seconds 1
+                Remove-Item -LiteralPath $stagingToRemove -Recurse -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $stagingToRemove) {
+                    cmd /c "rmdir /s /q `"$stagingToRemove`""
+                }
+                if (Test-Path -LiteralPath $stagingToRemove) {
+                    Start-Sleep -Seconds 2
+                    $null = & robocopy $emptyDir $stagingToRemove /mir /r:2 /w:2 /nfl /ndl /njh /njs 2>&1
+                    cmd /c "rmdir /s /q `"$stagingToRemove`""
+                }
+            } finally {
+                if (Test-Path $emptyDir) { Remove-Item -Path $emptyDir -Recurse -Force -ErrorAction SilentlyContinue }
+            }
+        }
+        if (Test-Path -LiteralPath $stagingToRemove) {
             throw "Could not remove staging directory (e.g. junction/symlink inside). Manually delete: $StagingDir"
         }
     }
@@ -191,8 +212,23 @@ function Invoke-Backup {
             $ErrorActionPreference = $prevErrPref
         }
         if ($LASTEXITCODE -ne 0) {
-            Remove-Item -Path $StagingDir -Recurse -Force -ErrorAction SilentlyContinue
-            if (Test-Path $StagingDir) { cmd /c "rmdir /s /q `"$StagingDir`"" }
+            $stagingToRemove = $StagingDir.TrimEnd('\')
+            Remove-Item -LiteralPath $stagingToRemove -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $stagingToRemove) {
+                cmd /c "rmdir /s /q `"$stagingToRemove`""
+            }
+            if (Test-Path -LiteralPath $stagingToRemove) {
+                $emptyDir = Join-Path $env:TEMP "ITGManiaBackupEmpty_$(Get-Random)"
+                New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
+                try {
+                    $null = & robocopy $emptyDir $stagingToRemove /mir /r:2 /w:2 /nfl /ndl /njh /njs 2>&1
+                    Start-Sleep -Seconds 1
+                    Remove-Item -LiteralPath $stagingToRemove -Recurse -Force -ErrorAction SilentlyContinue
+                    if (Test-Path -LiteralPath $stagingToRemove) { cmd /c "rmdir /s /q `"$stagingToRemove`"" }
+                } finally {
+                    if (Test-Path $emptyDir) { Remove-Item -Path $emptyDir -Recurse -Force -ErrorAction SilentlyContinue }
+                }
+            }
             New-Item -ItemType Directory -Path $StagingDir -Force | Out-Null
             Push-Location $StagingDir
             try {
@@ -295,6 +331,7 @@ function Invoke-Backup {
             & $gitExe config user.email "itgmania-backup@local"
             & $gitExe config user.name "ITGMania Backup"
             & $gitExe config core.autocrlf true
+            & $gitExe config core.longpaths true
             $ErrorActionPreference = 'Continue'
             $addOut = & $gitExe add -A 2>&1
             $crlfWarnCount = 0
@@ -305,9 +342,8 @@ function Invoke-Backup {
             if ($crlfWarnCount -gt 0) { Write-Log "Git normalized line endings for $crlfWarnCount file(s)." }
             if ($LASTEXITCODE -ne 0) {
                 Write-Log "git add -A failed (e.g. missing file or path too long). Retrying with add . only." -Level INFO
-                Set-Location -LiteralPath $StagingDir
-                $null = & $gitExe reset HEAD 2>&1
-                $addOut2 = & $gitExe add . 2>&1
+                $null = & $gitExe @('-C', $StagingDir, 'reset', 'HEAD') 2>&1
+                $addOut2 = & $gitExe @('-C', $StagingDir, 'add', '.') 2>&1
                 foreach ($line in $addOut2) {
                     $m = if ($null -eq $line) { "" } else { try { [string]$line } catch { "" } }
                     if ([string]::IsNullOrEmpty($m) -or $m -match 'LF will be replaced by CRLF') { continue }
@@ -316,25 +352,31 @@ function Invoke-Backup {
                 if ($LASTEXITCODE -ne 0) { throw "Git add failed. Check log for path or permission errors." }
             }
 
-            # README.md at repo root: timestamp + diff since last backup
+            # README.md at repo root: timestamp + per-file diff with explanations
             $hasHead = $false
             $revOut = & $gitExe rev-parse HEAD 2>&1
             if ($LASTEXITCODE -eq 0) { $hasHead = $true }
-            if ($hasHead) {
-                $diffOut = & $gitExe diff --cached HEAD 2>&1
-                $diffParts = [System.Collections.ArrayList]::new()
-                if ($null -ne $diffOut) { foreach ($o in $diffOut) { $t = ""; if ($null -ne $o) { try { $t = [string]$o } catch { } }; if ($null -eq $t) { $t = "" }; [void]$diffParts.Add($t) } }
-                $diffText = ($diffParts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join "`n"
-                if ([string]::IsNullOrWhiteSpace($diffText)) { $diffText = "No file changes since last backup." }
-            } else {
-                $diffStat = & $gitExe diff --cached --stat 2>&1
-                $statParts = [System.Collections.ArrayList]::new()
-                if ($null -ne $diffStat) { foreach ($o in $diffStat) { $t = ""; if ($null -ne $o) { try { $t = [string]$o } catch { } }; if ($null -eq $t) { $t = "" }; [void]$statParts.Add($t) } }
-                $statPart = ($statParts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join "`n"
-                $diffText = "Initial backup.`n" + [string]$statPart
-                if ([string]::IsNullOrWhiteSpace([string]$diffText)) { $diffText = "Initial backup." }
+            $nameOnlyOut = if ($hasHead) { & $gitExe diff --cached --name-only HEAD 2>&1 } else { & $gitExe diff --cached --name-only 2>&1 }
+            $changedFiles = @()
+            if ($null -ne $nameOnlyOut) {
+                $changedFiles = @($nameOnlyOut | ForEach-Object { $x = ""; if ($null -ne $_) { try { $x = [string]$_.Trim() } catch { } }; $x } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
             }
-            if ($null -eq $diffText) { $diffText = "No file changes since last backup." }
+            # Predefined path pattern -> explanation (first match wins; order matters)
+            $fileExplanationPairs = @(
+                @('*Preferences.ini', 'Game preferences (theme, options, etc.).'),
+                @('*MachineProfile*', 'Machine-level profile and stats.'),
+                @('*LocalProfiles*Stats.xml', 'Per-profile stats and score history.'),
+                @('*LocalProfiles*', 'Per-profile save data.'),
+                @('*SL-Scores*', 'Simply Love score exports (JSON).'),
+                @('*Screenshots*', 'Game screenshots.'),
+                @('*Upload*', 'Replay/upload queue.'),
+                @('*Themes*', 'Theme files.'),
+                @('*NoteSkins*', 'Note skin assets.'),
+                @('*Logs*', 'Log files.'),
+                @('*PACK_LIST.md', 'Manifest of Songs folder structure (filenames only).'),
+                @('README.md', 'This file; backup timestamp and change summary.')
+            )
+            $defaultExplanation = 'Backed up file.'
             $readmePath = Join-Path $StagingDir "README.md"
             $backupTime = Get-Date -Format 'yyyy-MM-dd HH:mm'
             if ([string]::IsNullOrEmpty([string]$backupTime)) { $backupTime = "unknown" }
@@ -348,16 +390,35 @@ function Invoke-Backup {
             [void]$readmeLines.Add("")
             [void]$readmeLines.Add("## Changes since last backup")
             [void]$readmeLines.Add("")
-            [void]$readmeLines.Add([string]$fence + "diff")
-            $diffText = [string]$diffText
-            if ([string]::IsNullOrEmpty($diffText)) { $diffLines = @() } else { $diffLines = $diffText -split "`n" }
-            foreach ($ln in $diffLines) {
-                $lineToAdd = ""
-                if ($null -ne $ln) { try { $lineToAdd = [string]$ln } catch { } }
-                if ([string]::IsNullOrEmpty($lineToAdd)) { $lineToAdd = "" }
-                [void]$readmeLines.Add($lineToAdd)
+            if ($changedFiles.Count -eq 0) {
+                [void]$readmeLines.Add("No file changes since last backup.")
+            } else {
+                foreach ($relPath in $changedFiles) {
+                    $explanation = $defaultExplanation
+                    foreach ($pair in $fileExplanationPairs) {
+                        if ($relPath -like $pair[0]) { $explanation = $pair[1]; break }
+                    }
+                    [void]$readmeLines.Add("### " + [string]$relPath)
+                    [void]$readmeLines.Add("")
+                    [void]$readmeLines.Add([string]$explanation)
+                    [void]$readmeLines.Add("")
+                    $perFileDiffOut = if ($hasHead) { & $gitExe diff --cached HEAD -- $relPath 2>&1 } else { & $gitExe diff --cached -- $relPath 2>&1 }
+                    $perFileDiffParts = [System.Collections.ArrayList]::new()
+                    if ($null -ne $perFileDiffOut) { foreach ($o in $perFileDiffOut) { $t = ""; if ($null -ne $o) { try { $t = [string]$o } catch { } }; if ($null -eq $t) { $t = "" }; [void]$perFileDiffParts.Add($t) } }
+                    $perFileDiffText = ($perFileDiffParts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join "`n"
+                    if ([string]::IsNullOrWhiteSpace($perFileDiffText)) { $perFileDiffText = "(no diff)" }
+                    [void]$readmeLines.Add([string]$fence + "diff")
+                    $perFileDiffLines = ([string]$perFileDiffText) -split "`n"
+                    foreach ($ln in $perFileDiffLines) {
+                        $lineToAdd = ""
+                        if ($null -ne $ln) { try { $lineToAdd = [string]$ln } catch { } }
+                        if ([string]::IsNullOrEmpty($lineToAdd)) { $lineToAdd = "" }
+                        [void]$readmeLines.Add($lineToAdd)
+                    }
+                    [void]$readmeLines.Add($fence)
+                    [void]$readmeLines.Add("")
+                }
             }
-            [void]$readmeLines.Add($fence)
             $safeLines = @()
             if ($readmeLines) {
                 foreach ($item in $readmeLines) {
