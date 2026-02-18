@@ -11,7 +11,9 @@
 #>
 
 param(
-    [string]$ConfigPath = $null
+    [string]$ConfigPath = $null,
+    [switch]$RepairDigests,
+    [string]$DigestsPath = $null
 )
 
 $ErrorActionPreference = 'Stop'
@@ -87,6 +89,7 @@ function Get-CloneUrlWithToken {
     }
     return $Url
 }
+
 
 function Copy-DirWithSizeFilter {
     param(
@@ -260,7 +263,7 @@ function Get-NewScoreEntriesFromStatsDiff {
                         }
                         $packPart = if ([string]::IsNullOrWhiteSpace($pack)) { "" } else { " (" + $pack + ")" }
                         $nameDisplay = if ([string]::IsNullOrWhiteSpace($name)) { "Player" } else { $name }
-                        $entry = "**" + [string]$nameDisplay + "** set a new score for **" + [string]$songTitle + "**" + $packPart + " - " + [string]$difficulty + ", " + [string]$stepsType
+                        $entry = "**" + [string]$nameDisplay + "**" + " set a new score for **" + [string]$songTitle + "**" + $packPart + " - " + [string]$difficulty + ", " + [string]$stepsType
                         if (-not [string]::IsNullOrWhiteSpace($pctDisplay)) { $entry += " - " + $pctDisplay }
                         $entry += $dateDisplay + "."
                         [void]$entries.Add($entry)
@@ -275,6 +278,351 @@ function Get-NewScoreEntriesFromStatsDiff {
         $i++
     }
     return @($entries)
+}
+
+function Format-SecondsToPlayTime {
+    param([long]$Seconds)
+    if ($Seconds -le 0) { return "0m 0s" }
+    $h = [Math]::Floor($Seconds / 3600)
+    $m = [Math]::Floor(($Seconds % 3600) / 60)
+    $s = $Seconds % 60
+    $parts = [System.Collections.ArrayList]::new()
+    if ($h -gt 0) { [void]$parts.Add("$h" + "h") }
+    [void]$parts.Add("$m" + "m")
+    [void]$parts.Add("$s" + "s")
+    return $parts -join " "
+}
+
+function Get-PlayTimeDeltaFromStatsDiff {
+    param([string]$DiffText, [string]$RelPath)
+    $result = [System.Collections.ArrayList]::new()
+    if ([string]::IsNullOrWhiteSpace($DiffText)) { return @($result) }
+    $lines = $DiffText -split "`r?`n"
+    $oldSeconds = $null
+    $newSeconds = $null
+    foreach ($line in $lines) {
+        if ($line -match '^-\s*<TotalGameplaySeconds>(\d+)</TotalGameplaySeconds>') { $oldSeconds = [long]$matches[1] }
+        if ($line -match '^\+\s*<TotalGameplaySeconds>(\d+)</TotalGameplaySeconds>') { $newSeconds = [long]$matches[1] }
+    }
+    $delta = 0
+    if ($null -ne $newSeconds -and $null -ne $oldSeconds) { $delta = $newSeconds - $oldSeconds }
+    if ($delta -le 0) { return @($result) }
+    $playerName = "Player"
+    $plusLines = @($lines | Where-Object { $_ -match '^\+' -and $_ -notmatch '^\+\+\+ ' })
+    foreach ($pl in $plusLines) {
+        $content = if ($pl.Length -gt 0 -and $pl[0] -eq '+') { $pl.Substring(1) } else { $pl }
+        if ($content -match "^\s*<Name>([^<]*)</Name>\s*$") {
+            $playerName = $matches[1].Trim()
+            if (-not [string]::IsNullOrWhiteSpace($playerName)) { break }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($playerName)) {
+        if ($RelPath -match 'LocalProfiles[/\\]([^/\\]+)[/\\]') { $playerName = "Profile " + $matches[1] }
+    }
+    [void]$result.Add(@{ PlayerName = $playerName; DeltaSeconds = $delta })
+    return @($result)
+}
+
+function Parse-PlayTimeLine {
+    param([string]$Line)
+    if ([string]::IsNullOrWhiteSpace($Line)) { return $null }
+    if ($Line -match 'Time in songs this run:\s*\*\*([^*]+)\*\*') {
+        $playerName = $matches[1].Trim()
+    } else { return $null }
+    $rest = $Line -replace '^Time in songs this run:\s*\*\*[^*]+\*\*\s*', ''
+    $h = 0; $m = 0; $s = 0
+    if ($rest -match '(\d+)h') { $h = [int]$matches[1] }
+    if ($rest -match '(\d+)m') { $m = [int]$matches[1] }
+    if ($rest -match '(\d+)s') { $s = [int]$matches[1] }
+    $seconds = $h * 3600 + $m * 60 + $s
+    return @{ PlayerName = $playerName; Seconds = $seconds }
+}
+
+$Script:SongLikeExtensions = @('.ogg', '.mp3')
+
+function Test-PackListLineIsSongFile {
+    param([string]$FileName)
+    if ([string]::IsNullOrWhiteSpace($FileName)) { return $false }
+    $ext = [System.IO.Path]::GetExtension($FileName).ToLowerInvariant()
+    return $Script:SongLikeExtensions -contains $ext
+}
+
+function Get-PackListDiffSummary {
+    param([string]$DiffText)
+    $added = @{}
+    $removed = @{}
+    if ([string]::IsNullOrWhiteSpace($DiffText)) { return @{ Added = $added; Removed = $removed } }
+    $lines = $DiffText -split "`r?`n"
+    $currentAddedPack = $null
+    $currentRemovedPack = $null
+    foreach ($line in $lines) {
+        if ($line -match '^\+(.*)$' -and $line -notmatch '^\+\+\+') {
+            $content = $matches[1]
+            if ($content -match '^\s*$' -or $content -match '^# Pack list' -or $content -match '^## Songs' -or $content -match '^## AdditionalSongs' -or $content -match 'Generated from InstallPath on ') { continue }
+            $indent = 0; if ($content -match '^(\s+)') { $indent = $matches[1].Length }
+            $level = [Math]::Floor($indent / 2)
+            if ($content -match '^\s*-\s+\*\*(.+)\*\*\s*$') {
+                $name = $matches[1].Trim()
+                if ($level -eq 0) {
+                    $currentAddedPack = $name
+                    if (-not $added.ContainsKey($currentAddedPack)) { $added[$currentAddedPack] = [System.Collections.ArrayList]::new() }
+                } else {
+                    $pack = $currentAddedPack; if ([string]::IsNullOrWhiteSpace($pack)) { $pack = "(root)" }
+                    if (-not $added.ContainsKey($pack)) { $added[$pack] = [System.Collections.ArrayList]::new() }
+                    if (-not $added[$pack].Contains($name)) { [void]$added[$pack].Add($name) }
+                }
+                continue
+            }
+        }
+        if ($line -match '^-(.*)$' -and $line -notmatch '^--- ') {
+            $content = $matches[1]
+            if ($content -match '^\s*$' -or $content -match '^# Pack list' -or $content -match '^## Songs' -or $content -match '^## AdditionalSongs' -or $content -match 'Generated from InstallPath on ') { continue }
+            $indent = 0; if ($content -match '^(\s+)') { $indent = $matches[1].Length }
+            $level = [Math]::Floor($indent / 2)
+            if ($content -match '^\s*-\s+\*\*(.+)\*\*\s*$') {
+                $name = $matches[1].Trim()
+                if ($level -eq 0) {
+                    $currentRemovedPack = $name
+                    if (-not $removed.ContainsKey($currentRemovedPack)) { $removed[$currentRemovedPack] = [System.Collections.ArrayList]::new() }
+                } else {
+                    $pack = $currentRemovedPack; if ([string]::IsNullOrWhiteSpace($pack)) { $pack = "(root)" }
+                    if (-not $removed.ContainsKey($pack)) { $removed[$pack] = [System.Collections.ArrayList]::new() }
+                    if (-not $removed[$pack].Contains($name)) { [void]$removed[$pack].Add($name) }
+                }
+                continue
+            }
+        }
+    }
+    return @{ Added = $added; Removed = $removed }
+}
+
+function Format-PackListDiffAsMarkdown {
+    param($Summary)
+    $added = $Summary.Added
+    $removed = $Summary.Removed
+    $out = [System.Collections.ArrayList]::new()
+    [void]$out.Add("<details>")
+    [void]$out.Add("<summary>Pack and song changes</summary>")
+    [void]$out.Add("")
+    [void]$out.Add("#### Pack and song changes")
+    [void]$out.Add("")
+    if ($added.Keys.Count -gt 0) {
+        [void]$out.Add("**Added**")
+        foreach ($pack in ($added.Keys | Sort-Object)) {
+            [void]$out.Add("- **$pack**")
+            foreach ($song in ($added[$pack] | Sort-Object)) {
+                [void]$out.Add("-- $song")
+            }
+        }
+        [void]$out.Add("")
+    }
+    if ($removed.Keys.Count -gt 0) {
+        [void]$out.Add("**Removed**")
+        foreach ($pack in ($removed.Keys | Sort-Object)) {
+            [void]$out.Add("- **$pack**")
+            foreach ($song in ($removed[$pack] | Sort-Object)) {
+                [void]$out.Add("-- $song")
+            }
+        }
+    }
+    [void]$out.Add("")
+    [void]$out.Add("</details>")
+    return ($out -join "`n").TrimEnd()
+}
+
+function Format-PackListDiffAsCollapsibleMarkdown {
+    param($AddedFinal, $RemovedFinal)
+    $out = [System.Collections.ArrayList]::new()
+    [void]$out.Add("<details>")
+    [void]$out.Add("<summary><strong>Pack and song changes (last 30 days)</strong></summary>")
+    [void]$out.Add("")
+    if ($AddedFinal.Keys.Count -gt 0) {
+        [void]$out.Add("**Added**")
+        [void]$out.Add("")
+        foreach ($pack in ($AddedFinal.Keys | Sort-Object)) {
+            [void]$out.Add("<details>")
+            [void]$out.Add("<summary>$($pack -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;' -replace '"', '&quot;')</summary>")
+            [void]$out.Add("")
+            foreach ($song in ($AddedFinal[$pack] | Sort-Object)) {
+                [void]$out.Add("-- $song")
+            }
+            [void]$out.Add("")
+            [void]$out.Add("</details>")
+            [void]$out.Add("")
+        }
+    }
+    if ($RemovedFinal.Keys.Count -gt 0) {
+        [void]$out.Add("**Removed**")
+        [void]$out.Add("")
+        foreach ($pack in ($RemovedFinal.Keys | Sort-Object)) {
+            [void]$out.Add("<details>")
+            [void]$out.Add("<summary>$($pack -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;' -replace '"', '&quot;')</summary>")
+            [void]$out.Add("")
+            foreach ($song in ($RemovedFinal[$pack] | Sort-Object)) {
+                [void]$out.Add("-- $song")
+            }
+            [void]$out.Add("")
+            [void]$out.Add("</details>")
+            [void]$out.Add("")
+        }
+    }
+    [void]$out.Add("</details>")
+    return ($out -join "`n").TrimEnd()
+}
+
+function Parse-DigestFilePackBlock {
+    param([string]$DigestContent)
+    $added = @{}
+    $removed = @{}
+    $lines = $DigestContent -split "`r?`n"
+    $inBlock = $false
+    $inAdded = $false
+    $inRemoved = $false
+    $currentPack = $null
+    foreach ($line in $lines) {
+        if ($line -match '^\s*#### Pack and song changes\s*$') { $inBlock = $true; $inAdded = $false; $inRemoved = $false; continue }
+        if (-not $inBlock) { continue }
+        if ($line -match '^\s*#### \d' -or $line -match '^\s*#### [A-Za-z]') {
+            if ($line -notmatch 'Pack and song changes') { $inBlock = $false; break }
+        }
+        if ($line -match '^\s*\*\*Added\*\*' -or $line -match '<summary>\s*\*\*Added\*\*') { $inAdded = $true; $inRemoved = $false; $currentPack = $null; continue }
+        if ($line -match '^\s*\*\*Removed\*\*' -or $line -match '<summary>\s*\*\*Removed\*\*') { $inRemoved = $true; $inAdded = $false; $currentPack = $null; continue }
+        if ($line -match '^\s*</details>\s*$' -or $line -match '^\s*<details>' -or $line -match '^\s*<summary>') { continue }
+        if ($line -match '^\s*-\s+(.+)\s+-\s+(\d+)\s+Song?s?\s*$') {
+            $packName = $matches[1].Trim()
+            $n = [int]$matches[2]
+            if ($n -gt 0) {
+                $list = [System.Collections.ArrayList]::new()
+                for ($i = 0; $i -lt $n; $i++) { [void]$list.Add("$packName|$i") }
+                if ($inAdded) { $added[$packName] = $list }
+                if ($inRemoved) { $removed[$packName] = $list }
+            }
+            continue
+        }
+        if ($line -match '^\s*-\s+\*\*(.+)\*\*\s*$') {
+            $packName = $matches[1].Trim()
+            $currentPack = $packName
+            if ($inAdded) { if (-not $added.ContainsKey($packName)) { $added[$packName] = [System.Collections.ArrayList]::new() } }
+            if ($inRemoved) { if (-not $removed.ContainsKey($packName)) { $removed[$packName] = [System.Collections.ArrayList]::new() } }
+            continue
+        }
+        if ($line -match '^\s*\*\*(.+)\*\*\s*$') {
+            $packName = $matches[1].Trim()
+            if ($packName -ne 'Added' -and $packName -ne 'Removed') {
+                $currentPack = $packName
+                if ($inAdded) { if (-not $added.ContainsKey($packName)) { $added[$packName] = [System.Collections.ArrayList]::new() } }
+                if ($inRemoved) { if (-not $removed.ContainsKey($packName)) { $removed[$packName] = [System.Collections.ArrayList]::new() } }
+            }
+            continue
+        }
+        if ($line -match '^\s+-\s+(.+)$') {
+            $songName = $matches[1].Trim()
+            $pack = $currentPack; if ([string]::IsNullOrWhiteSpace($pack)) { $pack = "(root)" }
+            if ($inAdded) { if (-not $added.ContainsKey($pack)) { $added[$pack] = [System.Collections.ArrayList]::new() }; if (-not $added[$pack].Contains($songName)) { [void]$added[$pack].Add($songName) } }
+            if ($inRemoved) { if (-not $removed.ContainsKey($pack)) { $removed[$pack] = [System.Collections.ArrayList]::new() }; if (-not $removed[$pack].Contains($songName)) { [void]$removed[$pack].Add($songName) } }
+            continue
+        }
+        if ($line -match '^\s*--\s+(.+)$') {
+            $songName = $matches[1].Trim()
+            $pack = $currentPack; if ([string]::IsNullOrWhiteSpace($pack)) { $pack = "(root)" }
+            if ($inAdded) { if (-not $added.ContainsKey($pack)) { $added[$pack] = [System.Collections.ArrayList]::new() }; if (-not $added[$pack].Contains($songName)) { [void]$added[$pack].Add($songName) } }
+            if ($inRemoved) { if (-not $removed.ContainsKey($pack)) { $removed[$pack] = [System.Collections.ArrayList]::new() }; if (-not $removed[$pack].Contains($songName)) { [void]$removed[$pack].Add($songName) } }
+        }
+    }
+    return @{ Added = $added; Removed = $removed }
+}
+
+function Get-SongToPackMap {
+    param([string]$InstallPath)
+    $map = @{}
+    if ([string]::IsNullOrWhiteSpace($InstallPath) -or -not (Test-Path $InstallPath)) { return $map }
+    $songsRoot = Join-Path $InstallPath "Songs"
+    $additionalRoot = Join-Path $InstallPath "AdditionalSongs"
+    foreach ($root in @($songsRoot, $additionalRoot)) {
+        if (-not (Test-Path $root)) { continue }
+        $packs = Get-ChildItem -Path $root -Directory -ErrorAction SilentlyContinue
+        foreach ($packDir in $packs) {
+            $packName = $packDir.Name
+            $songDirs = Get-ChildItem -Path $packDir.FullName -Directory -ErrorAction SilentlyContinue
+            foreach ($songDir in $songDirs) {
+                $map[$songDir.Name] = $packName
+            }
+        }
+    }
+    return $map
+}
+
+function Repair-DigestPackBlocks {
+    param([string]$DigestsDir, [string]$InstallPath = $null)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    $songToPack = $null
+    if (-not [string]::IsNullOrWhiteSpace($InstallPath)) {
+        $songToPack = Get-SongToPackMap -InstallPath $InstallPath
+        if ($songToPack.Keys.Count -gt 0) {
+            Write-Host "Using Songs at $InstallPath as source of truth ($($songToPack.Keys.Count) songs in map)."
+        }
+    }
+    $files = @(Get-ChildItem -Path $DigestsDir -Filter "*.md" -ErrorAction SilentlyContinue)
+    foreach ($f in $files) {
+        $path = $f.FullName
+        $content = [System.IO.File]::ReadAllText($path, $utf8NoBom)
+        $lines = $content -split "`r?`n"
+        $startIdx = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*#### Pack and song changes\s*$') {
+                $startIdx = $i
+                for ($j = $i - 1; $j -ge 0; $j--) {
+                    if ($lines[$j] -match '^\s*<details>\s*$') { $startIdx = $j; break }
+                    if ($lines[$j] -match '^\s*<summary>' -or $lines[$j] -match '^\s*$') { continue }
+                    break
+                }
+                break
+            }
+        }
+        if ($startIdx -lt 0) { continue }
+        $endIdx = $lines.Count - 1
+        for ($i = $startIdx + 1; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*####\s+' -and $lines[$i] -notmatch 'Pack and song changes') { $endIdx = $i - 1; break }
+            if ($lines[$i] -match '^\s*</details>\s*$') { $endIdx = $i; break }
+        }
+        $blockLines = $lines[$startIdx..$endIdx]
+        $blockContent = $blockLines -join "`n"
+        $parsed = Parse-DigestFilePackBlock -DigestContent $blockContent
+        if ($parsed.Added.Keys.Count -eq 0 -and $parsed.Removed.Keys.Count -eq 0) { continue }
+        if ($null -ne $songToPack -and $songToPack.Keys.Count -gt 0) {
+            $regroupedAdded = @{}
+            foreach ($key in $parsed.Added.Keys) {
+                $songs = $parsed.Added[$key]
+                if ($songToPack.ContainsKey($key)) {
+                    $pack = $songToPack[$key]
+                    if (-not $regroupedAdded.ContainsKey($pack)) { $regroupedAdded[$pack] = [System.Collections.ArrayList]::new() }
+                    if (-not $regroupedAdded[$pack].Contains($key)) { [void]$regroupedAdded[$pack].Add($key) }
+                } else {
+                    if (-not $regroupedAdded.ContainsKey($key)) { $regroupedAdded[$key] = [System.Collections.ArrayList]::new() }
+                    foreach ($s in $songs) { if (-not $regroupedAdded[$key].Contains($s)) { [void]$regroupedAdded[$key].Add($s) } }
+                }
+            }
+            $regroupedRemoved = @{}
+            foreach ($key in $parsed.Removed.Keys) {
+                $songs = $parsed.Removed[$key]
+                if ($songToPack.ContainsKey($key)) {
+                    $pack = $songToPack[$key]
+                    if (-not $regroupedRemoved.ContainsKey($pack)) { $regroupedRemoved[$pack] = [System.Collections.ArrayList]::new() }
+                    if (-not $regroupedRemoved[$pack].Contains($key)) { [void]$regroupedRemoved[$pack].Add($key) }
+                } else {
+                    if (-not $regroupedRemoved.ContainsKey($key)) { $regroupedRemoved[$key] = [System.Collections.ArrayList]::new() }
+                    foreach ($s in $songs) { if (-not $regroupedRemoved[$key].Contains($s)) { [void]$regroupedRemoved[$key].Add($s) } }
+                }
+            }
+            $parsed = @{ Added = $regroupedAdded; Removed = $regroupedRemoved }
+        }
+        $newBlock = Format-PackListDiffAsMarkdown -Summary $parsed
+        $before = if ($startIdx -eq 0) { "" } else { ($lines[0..($startIdx - 1)] -join "`n") + "`n" }
+        $after = if ($endIdx -ge $lines.Count - 1) { "" } else { "`n" + ($lines[($endIdx + 1)..($lines.Count - 1)] -join "`n") }
+        $newContent = $before + $newBlock + $after
+        [System.IO.File]::WriteAllText($path, $newContent, $utf8NoBom)
+        Write-Host "Repaired: $($f.Name)"
+    }
 }
 
 function Invoke-Backup {
@@ -516,8 +864,9 @@ function Invoke-Backup {
             if ([string]::IsNullOrWhiteSpace($backupTimeDisplay)) { $backupTimeDisplay = "unknown" }
             $nextRun = Get-NextCronRun -Cron $config.ScheduleCron -Timezone $config.ScheduleTimezone
             $nextBackupDisplay = if ($nextRun) { $nextRun.ToString("MMM d, yyyy 'at' h:mm tt") } else { "unknown" }
-            # Collect digest entries from LocalProfiles Stats.xml diffs
+            # Collect digest entries and play-time deltas from LocalProfiles Stats.xml diffs
             $digestEntries = [System.Collections.ArrayList]::new()
+            $playTimeDeltas = [System.Collections.ArrayList]::new()
             $statsXmlFiles = @($changedFiles | Where-Object { $_ -like '*LocalProfiles*Stats.xml' })
             foreach ($relPath in $statsXmlFiles) {
                 $perFileDiffOut = if ($hasHead) { & $gitExe diff --cached HEAD -- $relPath 2>&1 } else { & $gitExe diff --cached -- $relPath 2>&1 }
@@ -526,29 +875,67 @@ function Invoke-Backup {
                 $perFileDiffText = ($perFileDiffParts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join "`n"
                 $entries = Get-NewScoreEntriesFromStatsDiff -DiffText $perFileDiffText
                 foreach ($e in $entries) { [void]$digestEntries.Add($e) }
+                $deltas = Get-PlayTimeDeltaFromStatsDiff -DiffText $perFileDiffText -RelPath $relPath
+                foreach ($d in $deltas) { [void]$playTimeDeltas.Add($d) }
             }
-            # Write this run's digest file to digests/
-            $digestsDir = Join-Path $StagingDir "digests"
-            if (-not (Test-Path $digestsDir)) { New-Item -ItemType Directory -Path $digestsDir -Force | Out-Null }
-            $digestFileName = $backupDateTime.ToString("yyyy-MM-dd_HH-mm") + ".md"
-            $digestFilePath = Join-Path $digestsDir $digestFileName
-            $digestContent = "### " + [string]$backupTimeDisplay + "`n`n"
-            if ($digestEntries.Count -eq 0) {
-                $digestContent += "No new scores this run.`n"
-            } else {
-                foreach ($e in $digestEntries) { $digestContent += "- " + [string]$e + "`n" }
-            }
-            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-            [System.IO.File]::WriteAllText($digestFilePath, $digestContent, $utf8NoBom)
-            # Prune digests to 30 files (delete and git rm oldest)
-            $allDigests = @(Get-ChildItem -Path $digestsDir -Filter "*.md" -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
-            if ($allDigests.Count -gt 30) {
-                $toRemove = $allDigests[30..($allDigests.Count - 1)]
-                foreach ($f in $toRemove) {
-                    Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
-                    $relPath = "digests\" + $f.Name
-                    & $gitExe rm --cached --ignore-unmatch $relPath 2>&1 | Out-Null
+            $packListDigestBlock = ""
+            $packListPath = $changedFiles | Where-Object { $_ -like '*PACK_LIST.md' } | Select-Object -First 1
+            if ($packListPath) {
+                $packDiffOut = if ($hasHead) { & $gitExe diff --cached HEAD -- $packListPath 2>&1 } else { & $gitExe diff --cached -- $packListPath 2>&1 }
+                $packDiffParts = [System.Collections.ArrayList]::new()
+                if ($null -ne $packDiffOut) { foreach ($o in $packDiffOut) { $t = ""; if ($null -ne $o) { try { $t = [string]$o } catch { } }; if ($null -eq $t) { $t = "" }; [void]$packDiffParts.Add($t) } }
+                $packDiffText = ($packDiffParts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join "`n"
+                $packSkipDateOnly = $false
+                if (-not [string]::IsNullOrWhiteSpace($packDiffText) -and $packDiffText -ne "(no diff)") {
+                    $packDiffLines = ($packDiffText -split "`r?`n")
+                    $packMinusLines = @($packDiffLines | Where-Object { $_ -match '^-' -and $_ -notmatch '^--- ' })
+                    $packPlusLines = @($packDiffLines | Where-Object { $_ -match '^\+' -and $_ -notmatch '^\+\+\+ ' })
+                    $packOnlyDateMinus = ($packMinusLines.Count -eq 1) -and ($packMinusLines[0] -match 'Generated from InstallPath on .+\.')
+                    $packOnlyDatePlus = ($packPlusLines.Count -eq 1) -and ($packPlusLines[0] -match 'Generated from InstallPath on .+\.')
+                    if ($packOnlyDateMinus -and $packOnlyDatePlus) { $packSkipDateOnly = $true }
                 }
+                if (-not $packSkipDateOnly -and -not [string]::IsNullOrWhiteSpace($packDiffText)) {
+                    $packSummary = Get-PackListDiffSummary -DiffText $packDiffText
+                    if (($packSummary.Added.Keys.Count -gt 0) -or ($packSummary.Removed.Keys.Count -gt 0)) {
+                        $packListDigestBlock = Format-PackListDiffAsMarkdown -Summary $packSummary
+                    }
+                }
+            }
+            # Write this run's digest file to digests/ only when there's something to report
+            $digestsDir = Join-Path $StagingDir "digests"
+            $utf8WithBom = New-Object System.Text.UTF8Encoding $true
+            $hasDigestContent = ($digestEntries.Count -gt 0) -or ($playTimeDeltas.Count -gt 0) -or ($packListDigestBlock -ne "")
+            if ($hasDigestContent) {
+                if (-not (Test-Path $digestsDir)) { New-Item -ItemType Directory -Path $digestsDir -Force | Out-Null }
+                $digestFileName = $backupDateTime.ToString("yyyy-MM-dd_HH-mm") + ".md"
+                $digestFilePath = Join-Path $digestsDir $digestFileName
+                $digestContent = "#### " + [string]$backupTimeDisplay + "`n`n"
+                if ($playTimeDeltas.Count -gt 0) {
+                    foreach ($pt in $playTimeDeltas) {
+                        $digestContent += "Time in songs this run: **" + [string]$pt.PlayerName + "** " + (Format-SecondsToPlayTime -Seconds $pt.DeltaSeconds) + ".`n"
+                    }
+                    $digestContent += "`n"
+                }
+                if ($digestEntries.Count -gt 0) {
+                    foreach ($e in $digestEntries) { $digestContent += "- " + [string]$e + "`n" }
+                }
+                if ($packListDigestBlock -ne "") {
+                    $digestContent += $packListDigestBlock + "`n`n"
+                }
+                [System.IO.File]::WriteAllText($digestFilePath, $digestContent, $utf8WithBom)
+                # Prune digests to 30 files (delete and git rm oldest)
+                $allDigests = @(Get-ChildItem -Path $digestsDir -Filter "*.md" -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+                if ($allDigests.Count -gt 30) {
+                    $toRemove = $allDigests[30..($allDigests.Count - 1)]
+                    foreach ($f in $toRemove) {
+                        Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+                        $relPath = "digests\" + $f.Name
+                        & $gitExe rm --cached --ignore-unmatch $relPath 2>&1 | Out-Null
+                    }
+                }
+            }
+            if (Test-Path $digestsDir) {
+                Repair-DigestPackBlocks -DigestsDir $digestsDir -InstallPath $installPath
             }
             $fence = '```'
             if ([string]::IsNullOrEmpty([string]$fence)) { $fence = '```' }
@@ -567,10 +954,68 @@ function Invoke-Backup {
                 [void]$readmeLines.Add("No digest history yet.")
             } else {
                 $take = [Math]::Min(30, $digestFilesForReadme.Count)
+                $thirtyDayPlayTime = @{}
                 for ($idx = 0; $idx -lt $take; $idx++) {
                     $df = $digestFilesForReadme[$idx]
-                    $dc = [System.IO.File]::ReadAllText($df.FullName, $utf8NoBom).TrimEnd()
+                    $dc = [System.IO.File]::ReadAllText($df.FullName, [System.Text.Encoding]::UTF8).TrimEnd()
+                    foreach ($dl in ($dc -split "`r?`n")) {
+                        $parsed = Parse-PlayTimeLine -Line $dl
+                        if ($null -ne $parsed) {
+                            $pn = $parsed.PlayerName
+                            if (-not $thirtyDayPlayTime.ContainsKey($pn)) { $thirtyDayPlayTime[$pn] = 0 }
+                            $thirtyDayPlayTime[$pn] += $parsed.Seconds
+                        }
+                    }
+                }
+                if ($thirtyDayPlayTime.Count -gt 0) {
+                    [void]$readmeLines.Add("### 30-day play time (in songs)")
+                    [void]$readmeLines.Add("")
+                    foreach ($pn in ($thirtyDayPlayTime.Keys | Sort-Object)) {
+                        [void]$readmeLines.Add("- **" + $pn + "** " + (Format-SecondsToPlayTime -Seconds $thirtyDayPlayTime[$pn]))
+                    }
+                    [void]$readmeLines.Add("")
+                }
+                for ($idx = 0; $idx -lt $take; $idx++) {
+                    $df = $digestFilesForReadme[$idx]
+                    $dc = [System.IO.File]::ReadAllText($df.FullName, [System.Text.Encoding]::UTF8).TrimEnd()
                     foreach ($dl in ($dc -split "`r?`n")) { [void]$readmeLines.Add($dl) }
+                    [void]$readmeLines.Add("")
+                }
+                # Merge pack/song changes from last 30 digest files for summary (last item in 30-day digest)
+                $mergedAdded = @{}
+                $mergedRemoved = @{}
+                for ($idx = 0; $idx -lt $take; $idx++) {
+                    $df = $digestFilesForReadme[$idx]
+                    $dc = [System.IO.File]::ReadAllText($df.FullName, [System.Text.Encoding]::UTF8).TrimEnd()
+                    $parsed = Parse-DigestFilePackBlock -DigestContent $dc
+                    foreach ($pack in $parsed.Added.Keys) {
+                        if (-not $mergedAdded.ContainsKey($pack)) { $mergedAdded[$pack] = [System.Collections.ArrayList]::new() }
+                        foreach ($s in $parsed.Added[$pack]) { if (-not $mergedAdded[$pack].Contains($s)) { [void]$mergedAdded[$pack].Add($s) } }
+                    }
+                    foreach ($pack in $parsed.Removed.Keys) {
+                        if (-not $mergedRemoved.ContainsKey($pack)) { $mergedRemoved[$pack] = [System.Collections.ArrayList]::new() }
+                        foreach ($s in $parsed.Removed[$pack]) { if (-not $mergedRemoved[$pack].Contains($s)) { [void]$mergedRemoved[$pack].Add($s) } }
+                    }
+                }
+                $addedSet = @{}
+                foreach ($pack in $mergedAdded.Keys) { foreach ($s in $mergedAdded[$pack]) { $addedSet["$pack|$s"] = $true } }
+                $removedSet = @{}
+                foreach ($pack in $mergedRemoved.Keys) { foreach ($s in $mergedRemoved[$pack]) { $removedSet["$pack|$s"] = $true } }
+                $addedFinal = @{}
+                foreach ($pack in $mergedAdded.Keys) {
+                    $list = [System.Collections.ArrayList]::new()
+                    foreach ($s in $mergedAdded[$pack]) { if (-not $removedSet.ContainsKey("$pack|$s")) { [void]$list.Add($s) } }
+                    if ($list.Count -gt 0) { $addedFinal[$pack] = $list }
+                }
+                $removedFinal = @{}
+                foreach ($pack in $mergedRemoved.Keys) {
+                    $list = [System.Collections.ArrayList]::new()
+                    foreach ($s in $mergedRemoved[$pack]) { if (-not $addedSet.ContainsKey("$pack|$s")) { [void]$list.Add($s) } }
+                    if ($list.Count -gt 0) { $removedFinal[$pack] = $list }
+                }
+                if ($addedFinal.Keys.Count -gt 0 -or $removedFinal.Keys.Count -gt 0) {
+                    $collapsibleBlock = Format-PackListDiffAsCollapsibleMarkdown -AddedFinal $addedFinal -RemovedFinal $removedFinal
+                    foreach ($cl in ($collapsibleBlock -split "`r?`n")) { [void]$readmeLines.Add($cl) }
                     [void]$readmeLines.Add("")
                 }
             }
@@ -625,8 +1070,8 @@ function Invoke-Backup {
                     $safeLines += $s
                 }
             }
-            $utf8NoBomReadme = New-Object System.Text.UTF8Encoding $false
-            [System.IO.File]::WriteAllLines($readmePath, $safeLines, $utf8NoBomReadme)
+            $utf8WithBomReadme = New-Object System.Text.UTF8Encoding $true
+            [System.IO.File]::WriteAllLines($readmePath, $safeLines, $utf8WithBomReadme)
             & $gitExe add README.md 2>&1 | Out-Null
             & $gitExe add digests/ 2>&1 | Out-Null
             Write-Log "Wrote README.md"
@@ -677,6 +1122,22 @@ function Invoke-Backup {
         }
         exit 1
     }
+}
+
+if ($RepairDigests) {
+    $digestsDir = $DigestsPath
+    if (-not $digestsDir) { $digestsDir = Join-Path $StagingDir "digests" }
+    if (-not (Test-Path $digestsDir)) {
+        Write-Error "Digests path not found: $digestsDir. Use -DigestsPath to point to the digests folder (e.g. path to backup repo's digests/ folder)."
+        exit 1
+    }
+    $installPathForRepair = $null
+    try {
+        $config = Get-Config
+        if ($config -and $config.InstallPath) { $installPathForRepair = $config.InstallPath.TrimEnd('\') }
+    } catch { }
+    Repair-DigestPackBlocks -DigestsDir $digestsDir -InstallPath $installPathForRepair
+    exit 0
 }
 
 Invoke-Backup
