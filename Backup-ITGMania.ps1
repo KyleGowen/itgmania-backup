@@ -191,6 +191,92 @@ function Get-NextCronRun {
     return $null
 }
 
+function Get-SongDisplayNameFromDir {
+    param([string]$SongDir)
+    if ([string]::IsNullOrWhiteSpace($SongDir)) { return @{ SongTitle = ""; Pack = "" } }
+    $trimmed = $SongDir.TrimEnd('/').TrimEnd('\')
+    $parts = $trimmed -split '/' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    if ($parts.Count -eq 0) { return @{ SongTitle = ""; Pack = "" } }
+    $songTitle = $parts[-1]
+    $pack = if ($parts.Count -gt 1) { $parts[-2] } else { "" }
+    return @{ SongTitle = $songTitle; Pack = $pack }
+}
+
+function Get-NewScoreEntriesFromStatsDiff {
+    param([string]$DiffText)
+    $entries = [System.Collections.ArrayList]::new()
+    if ([string]::IsNullOrWhiteSpace($DiffText)) { return @($entries) }
+    $lines = $DiffText -split "`r?`n"
+    $plusLines = @($lines | Where-Object { $_ -match '^\+' -and $_ -notmatch '^\+\+\+ ' })
+    $contentLines = @($plusLines | ForEach-Object {
+        $s = $_.ToString()
+        if ($s.Length -gt 0 -and $s[0] -eq '+') { $s.Substring(1) } else { $s }
+    })
+    $i = 0
+    while ($i -lt $contentLines.Count) {
+        $line = $contentLines[$i]
+        if ($line -match "^\s*<Song\s+Dir=(['\""])(.+?)\1\s*>") {
+            $songDir = $matches[2]
+            $display = Get-SongDisplayNameFromDir -SongDir $songDir
+            $songTitle = $display.SongTitle
+            $pack = $display.Pack
+            $difficulty = ""
+            $stepsType = ""
+            $blockEnd = $i
+            $inSong = $true
+            $j = $i + 1
+            while ($j -lt $contentLines.Count -and $inSong) {
+                $cl = $contentLines[$j]
+                if ($cl -match "^\s*</Song>\s*$") { $blockEnd = $j; $inSong = $false; $j++; break }
+                if ($cl -match "^\s*<Steps\s+Difficulty=(['\""])([^'\""]+)\1\s+StepsType=(['\""])([^'\""]+)\3") {
+                    $difficulty = $matches[2]
+                    $stepsType = $matches[4]
+                }
+                if ($cl -match "^\s*<HighScore>\s*$") {
+                    $hsStart = $j
+                    $name = ""; $dateTime = ""; $percentDp = ""; $grade = ""
+                    $j++
+                    while ($j -lt $contentLines.Count) {
+                        $hl = $contentLines[$j]
+                        if ($hl -match "^\s*</HighScore>\s*$") { $j++; break }
+                        if ($hl -match "^\s*<Name>([^<]*)</Name>\s*$") { $name = $matches[1].Trim() }
+                        if ($hl -match "^\s*<DateTime>([^<]*)</DateTime>\s*$") { $dateTime = $matches[1].Trim() }
+                        if ($hl -match "^\s*<PercentDP>([^<]*)</PercentDP>\s*$") { $percentDp = $matches[1].Trim() }
+                        if ($hl -match "^\s*<Grade>([^<]*)</Grade>\s*$") { $grade = $matches[1].Trim() }
+                        $j++
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace($name) -or -not [string]::IsNullOrWhiteSpace($percentDp) -or -not [string]::IsNullOrWhiteSpace($dateTime)) {
+                        $pctDisplay = ""
+                        if (-not [string]::IsNullOrWhiteSpace($percentDp)) {
+                            $pctNum = 0.0
+                            if ([double]::TryParse($percentDp, [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$pctNum)) {
+                                $pctDisplay = ([math]::Round($pctNum * 100, 2)).ToString("0.00") + "% DP"
+                            } else { $pctDisplay = $percentDp + " DP" }
+                        }
+                        $dateDisplay = ""
+                        if (-not [string]::IsNullOrWhiteSpace($dateTime)) {
+                            if ($dateTime -match '^(\d{4}-\d{2}-\d{2})') { $dateDisplay = " on " + $matches[1] }
+                            else { $dateDisplay = " on " + $dateTime }
+                        }
+                        $packPart = if ([string]::IsNullOrWhiteSpace($pack)) { "" } else { " (" + $pack + ")" }
+                        $nameDisplay = if ([string]::IsNullOrWhiteSpace($name)) { "Player" } else { $name }
+                        $entry = "**" + [string]$nameDisplay + "** set a new score for **" + [string]$songTitle + "**" + $packPart + " - " + [string]$difficulty + ", " + [string]$stepsType
+                        if (-not [string]::IsNullOrWhiteSpace($pctDisplay)) { $entry += " - " + $pctDisplay }
+                        $entry += $dateDisplay + "."
+                        [void]$entries.Add($entry)
+                    }
+                    continue
+                }
+                $j++
+            }
+            $i = $blockEnd + 1
+            continue
+        }
+        $i++
+    }
+    return @($entries)
+}
+
 function Invoke-Backup {
     $config = Get-Config
     $gitExe = Get-GitExe
@@ -213,6 +299,7 @@ function Invoke-Backup {
     Write-Log "Starting backup. InstallPath=$installPath"
 
     if (Test-Path $StagingDir) {
+        Write-Log "Removing existing staging directory..."
         $stagingToRemove = $StagingDir.TrimEnd('\')
         Remove-Item -LiteralPath $stagingToRemove -Recurse -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $stagingToRemove) {
@@ -246,6 +333,7 @@ function Invoke-Backup {
 
     try {
         # Clone (depth 1). If repo is empty (no commits), clone fails; then init and add remote.
+        Write-Log "Cloning backup repo..."
         # Use Continue so git's stderr (progress lines) never triggers terminating error.
         $prevErrPref = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
@@ -428,6 +516,40 @@ function Invoke-Backup {
             if ([string]::IsNullOrWhiteSpace($backupTimeDisplay)) { $backupTimeDisplay = "unknown" }
             $nextRun = Get-NextCronRun -Cron $config.ScheduleCron -Timezone $config.ScheduleTimezone
             $nextBackupDisplay = if ($nextRun) { $nextRun.ToString("MMM d, yyyy 'at' h:mm tt") } else { "unknown" }
+            # Collect digest entries from LocalProfiles Stats.xml diffs
+            $digestEntries = [System.Collections.ArrayList]::new()
+            $statsXmlFiles = @($changedFiles | Where-Object { $_ -like '*LocalProfiles*Stats.xml' })
+            foreach ($relPath in $statsXmlFiles) {
+                $perFileDiffOut = if ($hasHead) { & $gitExe diff --cached HEAD -- $relPath 2>&1 } else { & $gitExe diff --cached -- $relPath 2>&1 }
+                $perFileDiffParts = [System.Collections.ArrayList]::new()
+                if ($null -ne $perFileDiffOut) { foreach ($o in $perFileDiffOut) { $t = ""; if ($null -ne $o) { try { $t = [string]$o } catch { } }; if ($null -eq $t) { $t = "" }; [void]$perFileDiffParts.Add($t) } }
+                $perFileDiffText = ($perFileDiffParts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join "`n"
+                $entries = Get-NewScoreEntriesFromStatsDiff -DiffText $perFileDiffText
+                foreach ($e in $entries) { [void]$digestEntries.Add($e) }
+            }
+            # Write this run's digest file to digests/
+            $digestsDir = Join-Path $StagingDir "digests"
+            if (-not (Test-Path $digestsDir)) { New-Item -ItemType Directory -Path $digestsDir -Force | Out-Null }
+            $digestFileName = $backupDateTime.ToString("yyyy-MM-dd_HH-mm") + ".md"
+            $digestFilePath = Join-Path $digestsDir $digestFileName
+            $digestContent = "### " + [string]$backupTimeDisplay + "`n`n"
+            if ($digestEntries.Count -eq 0) {
+                $digestContent += "No new scores this run.`n"
+            } else {
+                foreach ($e in $digestEntries) { $digestContent += "- " + [string]$e + "`n" }
+            }
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($digestFilePath, $digestContent, $utf8NoBom)
+            # Prune digests to 30 files (delete and git rm oldest)
+            $allDigests = @(Get-ChildItem -Path $digestsDir -Filter "*.md" -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+            if ($allDigests.Count -gt 30) {
+                $toRemove = $allDigests[30..($allDigests.Count - 1)]
+                foreach ($f in $toRemove) {
+                    Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+                    $relPath = "digests\" + $f.Name
+                    & $gitExe rm --cached --ignore-unmatch $relPath 2>&1 | Out-Null
+                }
+            }
             $fence = '```'
             if ([string]::IsNullOrEmpty([string]$fence)) { $fence = '```' }
             $readmeLines = New-Object System.Collections.ArrayList
@@ -438,6 +560,20 @@ function Invoke-Backup {
             [void]$readmeLines.Add("")
             [void]$readmeLines.Add("#### Next backup: " + [string]$nextBackupDisplay)
             [void]$readmeLines.Add("")
+            [void]$readmeLines.Add("## 30-day digest")
+            [void]$readmeLines.Add("")
+            $digestFilesForReadme = @(Get-ChildItem -Path $digestsDir -Filter "*.md" -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
+            if ($digestFilesForReadme.Count -eq 0) {
+                [void]$readmeLines.Add("No digest history yet.")
+            } else {
+                $take = [Math]::Min(30, $digestFilesForReadme.Count)
+                for ($idx = 0; $idx -lt $take; $idx++) {
+                    $df = $digestFilesForReadme[$idx]
+                    $dc = [System.IO.File]::ReadAllText($df.FullName, $utf8NoBom).TrimEnd()
+                    foreach ($dl in ($dc -split "`r?`n")) { [void]$readmeLines.Add($dl) }
+                    [void]$readmeLines.Add("")
+                }
+            }
             [void]$readmeLines.Add("## Changes since last backup")
             [void]$readmeLines.Add("")
             if ($changedFiles.Count -eq 0) {
@@ -492,6 +628,7 @@ function Invoke-Backup {
             $utf8NoBomReadme = New-Object System.Text.UTF8Encoding $false
             [System.IO.File]::WriteAllLines($readmePath, $safeLines, $utf8NoBomReadme)
             & $gitExe add README.md 2>&1 | Out-Null
+            & $gitExe add digests/ 2>&1 | Out-Null
             Write-Log "Wrote README.md"
 
             $commitOut = & $gitExe commit -m "Backup $(Get-Date -Format 'yyyy-MM-dd HH:mm')" 2>&1
