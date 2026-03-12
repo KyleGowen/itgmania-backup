@@ -397,6 +397,57 @@ function Parse-PlayTimeLine {
     return @{ PlayerName = $playerName; Seconds = $seconds }
 }
 
+function Parse-DigestScoreLine {
+    param([string]$Line)
+    if ([string]::IsNullOrWhiteSpace($Line)) { return $null }
+    $content = $Line.Trim()
+    if ($content.StartsWith('- ')) { $content = $content.Substring(2).Trim() }
+    if (-not ($content -match '^\*\*([^*]+)\*\*')) { return $null }
+    $playerName = $matches[1].Trim()
+    if (-not ($content -match '\((\d+)\)')) { return $null }
+    $meter = [int]$matches[1]
+    if (-not ($content -match 'on\s+(\d{4}-\d{2}-\d{2})')) { return $null }
+    $dateStr = $matches[1]
+    $parsedDate = [DateTime]::MinValue
+    if (-not ([DateTime]::TryParseExact($dateStr, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$parsedDate))) { return $null }
+    return @{ PlayerName = $playerName; Meter = $meter; Date = $parsedDate }
+}
+
+function Get-MeterTallyFromDigests {
+    param([array]$DigestFilePaths, [DateTime]$CutoffDate)
+    $tally = @{}
+    foreach ($df in $DigestFilePaths) {
+        if (-not (Test-Path -LiteralPath $df)) { continue }
+        $content = [System.IO.File]::ReadAllText($df, [System.Text.Encoding]::UTF8)
+        foreach ($line in ($content -split "`r?`n")) {
+            $parsed = Parse-DigestScoreLine -Line $line
+            if ($null -eq $parsed) { continue }
+            if ($parsed.Date -lt $CutoffDate) { continue }
+            $pn = $parsed.PlayerName
+            if (-not $tally.ContainsKey($pn)) { $tally[$pn] = @{} }
+            $m = $parsed.Meter
+            if (-not $tally[$pn].ContainsKey($m)) { $tally[$pn][$m] = 0 }
+            $tally[$pn][$m] += 1
+        }
+    }
+    return $tally
+}
+
+function Format-MeterTallyForPlayerAsMarkdown {
+    param([string]$PlayerName, [hashtable]$MeterTally)
+    if ($null -eq $MeterTally -or $MeterTally.Count -eq 0) { return "" }
+    $meters = @($MeterTally.Keys | Sort-Object { [int]$_ })
+    $total = 0
+    foreach ($m in $meters) { $total += $MeterTally[$m] }
+    $headerCells = @($meters | ForEach-Object { [string]$_ }) + @("Total")
+    $headerRow = "| " + ($headerCells -join " | ") + " |"
+    $sepCells = @($meters | ForEach-Object { "---" }) + @("---")
+    $sepRow = "| " + ($sepCells -join " | ") + " |"
+    $dataCells = @($meters | ForEach-Object { [string]$MeterTally[$_] }) + @([string]$total)
+    $dataRow = "| " + ($dataCells -join " | ") + " |"
+    return $headerRow + "`n" + $sepRow + "`n" + $dataRow
+}
+
 $Script:SongLikeExtensions = @('.ogg', '.mp3')
 
 function Test-PackListLineIsSongFile {
@@ -1029,8 +1080,20 @@ function Invoke-Backup {
                 if ($thirtyDayPlayTime.Count -gt 0) {
                     [void]$readmeLines.Add("### 30-day play time (in songs)")
                     [void]$readmeLines.Add("")
+                    $cutoffDate = (Get-Date).AddDays(-30).Date
+                    $digestPaths = @()
+                    for ($idx = 0; $idx -lt $take; $idx++) { $digestPaths += $digestFilesForReadme[$idx].FullName }
+                    $meterTally = Get-MeterTallyFromDigests -DigestFilePaths $digestPaths -CutoffDate $cutoffDate
                     foreach ($pn in ($thirtyDayPlayTime.Keys | Sort-Object)) {
                         [void]$readmeLines.Add("- **" + $pn + "** " + (Format-SecondsToPlayTime -Seconds $thirtyDayPlayTime[$pn]))
+                        if ($meterTally.ContainsKey($pn)) {
+                            $table = Format-MeterTallyForPlayerAsMarkdown -PlayerName $pn -MeterTally $meterTally[$pn]
+                            if (-not [string]::IsNullOrWhiteSpace($table)) {
+                                [void]$readmeLines.Add("")
+                                foreach ($tl in ($table -split "`r?`n")) { [void]$readmeLines.Add($tl) }
+                                [void]$readmeLines.Add("")
+                            }
+                        }
                     }
                     [void]$readmeLines.Add("")
                 }
@@ -1183,20 +1246,21 @@ function Invoke-Backup {
     }
 }
 
-if ($RepairDigests) {
-    $digestsDir = $DigestsPath
-    if (-not $digestsDir) { $digestsDir = Join-Path $StagingDir "digests" }
-    if (-not (Test-Path $digestsDir)) {
-        Write-Error "Digests path not found: $digestsDir. Use -DigestsPath to point to the digests folder (e.g. path to backup repo's digests/ folder)."
-        exit 1
+if ($MyInvocation.InvocationName -ne '.') {
+    if ($RepairDigests) {
+        $digestsDir = $DigestsPath
+        if (-not $digestsDir) { $digestsDir = Join-Path $StagingDir "digests" }
+        if (-not (Test-Path $digestsDir)) {
+            Write-Error "Digests path not found: $digestsDir. Use -DigestsPath to point to the digests folder (e.g. path to backup repo's digests/ folder)."
+            exit 1
+        }
+        $installPathForRepair = $null
+        try {
+            $config = Get-Config
+            if ($config -and $config.InstallPath) { $installPathForRepair = $config.InstallPath.TrimEnd('\') }
+        } catch { }
+        Repair-DigestPackBlocks -DigestsDir $digestsDir -InstallPath $installPathForRepair
+        exit 0
     }
-    $installPathForRepair = $null
-    try {
-        $config = Get-Config
-        if ($config -and $config.InstallPath) { $installPathForRepair = $config.InstallPath.TrimEnd('\') }
-    } catch { }
-    Repair-DigestPackBlocks -DigestsDir $digestsDir -InstallPath $installPathForRepair
-    exit 0
+    Invoke-Backup
 }
-
-Invoke-Backup

@@ -12,6 +12,7 @@ alwaysApply: true
 ## Tech stack
 
 - **PowerShell 5.1+**
+- **Pester** (unit tests; compatible with Pester 3.x and 5.x)
 - **Git for Windows**
 - **Windows Task Scheduler** (cron)
 
@@ -20,6 +21,10 @@ alwaysApply: true
 | File | Purpose |
 |------|---------|
 | `Backup-ITGMania.ps1` | Main backup script: clone, copy, commit, force-push |
+| `Tests/Backup-ITGMania.Tests.ps1` | Pester unit tests for backup script |
+| `Tests/CronRunner.Tests.ps1` | Pester unit tests for cron runner |
+| `Tests/Install-ITGManiaBackup.Tests.ps1` | Pester unit tests for installer |
+| `Tests/Get-CoverageReport.ps1` | Runs Pester with coverage and outputs per-file report |
 | `Install-ITGManiaBackup.ps1` | Installer wizard; creates scheduled task and config |
 | `Install-ITGManiaBackup.bat` | Launcher for installer (no PowerShell association needed) |
 | `CronRunner.ps1` | Evaluates cron expression and runs backup when due |
@@ -29,6 +34,7 @@ alwaysApply: true
 
 ## Directory structure
 
+- **`Tests/`** – Pester unit tests; `Tests/Fixtures/` contains config, sample diffs, and `.ssc` for meter lookup
 - **`repo/`** – Staging directory for the cloned backup repo (created during backup)
 - **`Logs/`** – Backup logs (when run from script dir)
 - **`backup-repo-clone/`** – Likely a local clone of the backup destination (not part of the backup flow)
@@ -61,3 +67,12 @@ Digest entries are built from LocalProfiles Stats.xml diffs. Each new score line
 
 - **Meter display:** Difficulty is shown with numeric level when available, e.g. `Challenge (12)` or `Easy (3)`. `Get-MeterFromSongChart` looks up the meter from the song's `.ssc` or `.sm` file under `InstallPath` + `SongDir`. Prefers `.ssc` (StepMania 5), falls back to `.sm`. Meter lookup requires the song folder to exist on disk (backup runs on the user's machine; Songs are not backed up).
 - **Flow:** `Get-NewScoreEntriesFromStatsDiff` parses the diff, calls `Get-MeterFromSongChart` for each score, formats as `Difficulty (Meter)` when found.
+- **30-day meter tables:** Per-player tables show songs played at each numeric level in the last 30 calendar days. One table per player, placed after that player's play time total. Uses `Parse-DigestScoreLine`, `Get-MeterTallyFromDigests`, `Format-MeterTallyForPlayerAsMarkdown`.
+
+## Change documentation
+
+Whenever you make changes to the codebase, create or update cursor context files summarizing the results:
+
+- Add a brief summary of what changed to `.cursor/rules/project-context.mdc` (in a relevant section) or to `CONTEXT.md`.
+- For substantial changes, add a new section or rule file under `.cursor/rules/` describing the new behavior.
+- Keep summaries concise: what was added/changed, where it lives, and any important constraints.

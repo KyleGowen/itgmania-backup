@@ -5,16 +5,22 @@
   Intended to be run every minute by Task Scheduler.
 #>
 
+param([string]$ConfigPath = $null)
+
 $ProgramDataRoot = Join-Path $env:ProgramData "ITGManiaBackup"
 $LocalAppDataRoot = Join-Path $env:LOCALAPPDATA "ITGManiaBackup"
-if (Test-Path (Join-Path $ProgramDataRoot "config.json")) {
+if ($ConfigPath -and (Test-Path -LiteralPath $ConfigPath)) {
+    $InstallRoot = Split-Path -Parent $ConfigPath
+} elseif (Test-Path (Join-Path $ProgramDataRoot "config.json")) {
     $InstallRoot = $ProgramDataRoot
+    $ConfigPath = Join-Path $InstallRoot "config.json"
 } elseif (Test-Path (Join-Path $LocalAppDataRoot "config.json")) {
     $InstallRoot = $LocalAppDataRoot
+    $ConfigPath = Join-Path $InstallRoot "config.json"
 } else {
     exit 0
 }
-$ConfigPath = Join-Path $InstallRoot "config.json"
+if (-not $ConfigPath) { $ConfigPath = Join-Path $InstallRoot "config.json" }
 $BackupScript = Join-Path $InstallRoot "Backup-ITGMania.ps1"
 if (-not (Test-Path $BackupScript)) { exit 0 }
 
@@ -62,6 +68,6 @@ $dow = [int]$now.DayOfWeek
 $dowMatch = Test-CronPart -Part $dowPart -Value $dow -Min 0 -Max 7
 if (-not $dowMatch -and $dow -eq 0 -and $dowPart -eq '7') { $dowMatch = $true }
 
-if ($minuteMatch -and $hourMatch -and $dayMatch -and $monthMatch -and $dowMatch) {
+if ($MyInvocation.InvocationName -ne '.' -and $minuteMatch -and $hourMatch -and $dayMatch -and $monthMatch -and $dowMatch) {
     & $BackupScript -ConfigPath $ConfigPath
 }

@@ -1,0 +1,16 @@
+--- a/ITGMania/PACK_LIST.md
++++ b/ITGMania/PACK_LIST.md
+@@ -5,6 +5,10 @@
+ - **TestPack**
+   - song1.ogg
+   - song2.ogg
++- **NewPack**
++  - **NewSubPack**
++    - newsong.ogg
++- **AnotherPack**
++  - another.ogg
+@@ -15,4 +19,3 @@
+ - **OldPack**
+   - oldsong.ogg
+-  - **RemovedSubPack**
+-    - removedsong.ogg

@@ -7,3 +7,6 @@ repo/
 # Logs (if anyone runs backup from repo dir)
 Logs/
 *.log
+
+# Pester code coverage output
+coverage.xml
