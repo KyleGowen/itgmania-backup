@@ -205,8 +205,65 @@ function Get-SongDisplayNameFromDir {
     return @{ SongTitle = $songTitle; Pack = $pack }
 }
 
+function Get-MeterFromSongChart {
+    param([string]$InstallPath, [string]$SongDir, [string]$Difficulty, [string]$StepsType)
+    if ([string]::IsNullOrWhiteSpace($InstallPath) -or [string]::IsNullOrWhiteSpace($SongDir)) { return "" }
+    $songFolder = Join-Path $InstallPath ($SongDir.TrimEnd('/').TrimEnd('\'))
+    if (-not (Test-Path -LiteralPath $songFolder)) { return "" }
+    $diffLower = $Difficulty.Trim().ToLowerInvariant()
+    $stepsLower = $StepsType.Trim().ToLowerInvariant()
+    # Prefer .ssc (StepMania 5 format)
+    $sscFiles = @(Get-ChildItem -Path $songFolder -Filter "*.ssc" -ErrorAction SilentlyContinue)
+    foreach ($f in $sscFiles) {
+        try {
+            $content = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+            $blockStart = 0
+            while ($true) {
+                $notedataIdx = $content.IndexOf("#NOTEDATA:", $blockStart, [StringComparison]::OrdinalIgnoreCase)
+                if ($notedataIdx -lt 0) { break }
+                $blockEnd = $content.IndexOf("#NOTEDATA:", $notedataIdx + 10, [StringComparison]::OrdinalIgnoreCase)
+                if ($blockEnd -lt 0) { $blockEnd = $content.Length }
+                $block = $content.Substring($notedataIdx, $blockEnd - $notedataIdx)
+                if ($block -match "#STEPSTYPE:\s*([^;]+);" -and $matches[1].Trim().ToLowerInvariant() -eq $stepsLower) {
+                    if ($block -match "#DIFFICULTY:\s*([^;]+);" -and $matches[1].Trim().ToLowerInvariant() -eq $diffLower) {
+                        if ($block -match "#METER:\s*(\d+)\s*;") { return $matches[1].Trim() }
+                    }
+                }
+                $blockStart = $blockEnd
+            }
+        } catch { }
+    }
+    # Fallback to .sm format
+    $smFiles = @(Get-ChildItem -Path $songFolder -Filter "*.sm" -ErrorAction SilentlyContinue)
+    foreach ($f in $smFiles) {
+        try {
+            $content = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
+            $notesIdx = $content.IndexOf("#NOTES:")
+            if ($notesIdx -lt 0) { continue }
+            $notesSection = $content.Substring($notesIdx)
+            $lines = $notesSection -split "`r?`n"
+            $i = 0
+            while ($i -lt $lines.Count) {
+                $line = $lines[$i].Trim()
+                if ($line -match "^\s*([^:]+):\s*$") {
+                    $stype = $matches[1].Trim().ToLowerInvariant()
+                    if ($stype -eq $stepsLower -and ($i + 2) -lt $lines.Count) {
+                        $diffLine = $lines[$i + 1].Trim()
+                        if ($diffLine -match "^\s*([^:]+):?\s*$" -and $matches[1].Trim().ToLowerInvariant() -eq $diffLower) {
+                            $meterLine = $lines[$i + 2].Trim()
+                            if ($meterLine -match "^\s*(\d+)\s*:?\s*$") { return $matches[1].Trim() }
+                        }
+                    }
+                }
+                $i++
+            }
+        } catch { }
+    }
+    return ""
+}
+
 function Get-NewScoreEntriesFromStatsDiff {
-    param([string]$DiffText)
+    param([string]$DiffText, [string]$InstallPath = "")
     $entries = [System.Collections.ArrayList]::new()
     if ([string]::IsNullOrWhiteSpace($DiffText)) { return @($entries) }
     $lines = $DiffText -split "`r?`n"
@@ -263,7 +320,9 @@ function Get-NewScoreEntriesFromStatsDiff {
                         }
                         $packPart = if ([string]::IsNullOrWhiteSpace($pack)) { "" } else { " (" + $pack + ")" }
                         $nameDisplay = if ([string]::IsNullOrWhiteSpace($name)) { "Player" } else { $name }
-                        $entry = "**" + [string]$nameDisplay + "**" + " set a new score for **" + [string]$songTitle + "**" + $packPart + " - " + [string]$difficulty + ", " + [string]$stepsType
+                        $meter = Get-MeterFromSongChart -InstallPath $InstallPath -SongDir $songDir -Difficulty $difficulty -StepsType $stepsType
+                        $difficultyDisplay = if ([string]::IsNullOrWhiteSpace($meter)) { $difficulty } else { $difficulty + " (" + $meter + ")" }
+                        $entry = "**" + [string]$nameDisplay + "**" + " set a new score for **" + [string]$songTitle + "**" + $packPart + " - " + [string]$difficultyDisplay + ", " + [string]$stepsType
                         if (-not [string]::IsNullOrWhiteSpace($pctDisplay)) { $entry += " - " + $pctDisplay }
                         $entry += $dateDisplay + "."
                         [void]$entries.Add($entry)
@@ -873,7 +932,7 @@ function Invoke-Backup {
                 $perFileDiffParts = [System.Collections.ArrayList]::new()
                 if ($null -ne $perFileDiffOut) { foreach ($o in $perFileDiffOut) { $t = ""; if ($null -ne $o) { try { $t = [string]$o } catch { } }; if ($null -eq $t) { $t = "" }; [void]$perFileDiffParts.Add($t) } }
                 $perFileDiffText = ($perFileDiffParts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join "`n"
-                $entries = Get-NewScoreEntriesFromStatsDiff -DiffText $perFileDiffText
+                $entries = Get-NewScoreEntriesFromStatsDiff -DiffText $perFileDiffText -InstallPath $installPath
                 foreach ($e in $entries) { [void]$digestEntries.Add($e) }
                 $deltas = Get-PlayTimeDeltaFromStatsDiff -DiffText $perFileDiffText -RelPath $relPath
                 foreach ($d in $deltas) { [void]$playTimeDeltas.Add($d) }

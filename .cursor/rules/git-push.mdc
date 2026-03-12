@@ -1,0 +1,13 @@
+---
+description: Use full permissions for git push so Windows credential store can authenticate to GitHub
+alwaysApply: true
+---
+
+# Git push from Cursor
+
+When running **git push** (or any git command that needs to reach the remote, e.g. push, fetch, pull), run the command with **full permissions** (`required_permissions: ["all"]`). Otherwise the sandbox blocks access to the Windows credential manager and push fails with SEC_E_NO_CREDENTIALS.
+
+Use this for the push step when the user asks to "commit and push" or "push":
+
+- For the **push** command specifically, include `required_permissions: ["all"]`.
+- Ensure PATH includes Git: e.g. `$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")` before calling git in PowerShell.
