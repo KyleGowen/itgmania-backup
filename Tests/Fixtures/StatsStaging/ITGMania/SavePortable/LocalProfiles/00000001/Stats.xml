@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Stats>
+  <TotalGameplaySeconds>3600</TotalGameplaySeconds>
+  <Name>TestPlayer</Name>
+  <SongScores>
+    <Song Dir="Songs/TestPack/TestSong">
+      <Steps Difficulty="Challenge" StepsType="dance-single">
+        <HighScoreList>
+          <HighScore>
+            <Name>TestPlayer</Name>
+            <DateTime>2024-01-10T12:00:00</DateTime>
+            <PercentDP>0.80</PercentDP>
+            <Grade>B</Grade>
+          </HighScore>
+          <HighScore>
+            <Name>TestPlayer</Name>
+            <DateTime>2024-01-15T12:30:00</DateTime>
+            <PercentDP>0.955</PercentDP>
+            <Grade>A</Grade>
+          </HighScore>
+        </HighScoreList>
+      </Steps>
+    </Song>
+    <Song Dir="Songs/TestPack/SmSong">
+      <Steps Difficulty="Medium" StepsType="dance-single">
+        <HighScoreList>
+          <HighScore>
+            <Name>TestPlayer</Name>
+            <DateTime>2024-01-20T14:00:00</DateTime>
+            <PercentDP>0.82</PercentDP>
+            <Grade>A</Grade>
+          </HighScore>
+        </HighScoreList>
+      </Steps>
+    </Song>
+  </SongScores>
+</Stats>

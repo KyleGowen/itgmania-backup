@@ -1,0 +1,96 @@
+---
+description: Digest, meter lookup, and Stats.xml parsing – technical reference for score history and 30-day tables
+globs: Backup-ITGMania.ps1
+---
+
+# Digest and Stats.xml – Technical Reference
+
+Reference for digest generation, meter lookup, and 30-day meter tables. Use when modifying score display, meter parsing, or Stats.xml handling.
+
+## Data Flow Overview
+
+```mermaid
+flowchart LR
+    subgraph NewScores [New high scores]
+        Diff[Stats.xml diff] --> ParseDiff[Get-NewScoreEntriesFromStatsDiff]
+        ParseDiff --> MeterLookup[Get-MeterFromSongChart]
+        MeterLookup --> DigestEntry[Digest line with meter]
+    end
+    
+    subgraph AllScores [All songs completed]
+        Stats[Full Stats.xml] --> ParseStats[Get-MeterTallyFromStatsXml]
+        ParseStats --> FilterDate[DateTime >= cutoff]
+        FilterDate --> MeterLookup2[Get-MeterFromSongChart]
+        MeterLookup2 --> Tally[30-day meter table]
+    end
+```
+
+## Digest Entries (New High Scores)
+
+**Source:** Git diff of `LocalProfiles/*/Stats.xml` between backup runs.
+
+**Flow:**
+1. `Get-NewScoreEntriesFromStatsDiff` parses the diff for `<Song Dir="...">` blocks with `<Steps>` and `<HighScore>`.
+2. For each new score, calls `Get-MeterFromSongChart` with `SongDir`, `Difficulty`, `StepsType`.
+3. Formats as `**Player** set a new score for **Song** (Pack) - Difficulty (Meter), dance-single - X% DP on date.`
+
+**Repair:** `Repair-DigestMeters` runs after digest write. For lines missing meters, uses `Parse-DigestScoreLineForMeterRepair` → `Get-SongFolderByPackAndName` → `Get-MeterFromSongFolder` to add meters to existing digest files.
+
+## Meter Lookup
+
+**Functions:** `Get-MeterFromSongChart`, `Get-MeterFromSongFolder`, `Get-SongFolderByPackAndName`
+
+**Path resolution order:**
+1. `InstallPath + SongDir` (e.g. `C:\ITGMania\Songs\Pack\Song`)
+2. For `AdditionalSongs/` prefix: each path from `AdditionalSongFolderPaths` + suffix
+3. If no `Songs/` or `AdditionalSongs/` prefix: try `InstallPath\Songs\SongDir`
+4. **Fallback:** `Get-SongFolderByPackAndName` – search for `Pack/SongFolder` across all song roots (Songs, AdditionalSongs, AdditionalSongFolderPaths). Matches exact, StartsWith, or Contains.
+
+**AdditionalSongFolderPaths:** From `config.json` `AdditionalSongFolderPaths` array, or parsed from `Preferences.ini` `AdditionalSongFolders` (Save folder, AppData, install root).
+
+**Chart parsing:**
+- **.ssc:** `#NOTEDATA:` blocks with `#STEPSTYPE`, `#DIFFICULTY`, `#METER`
+- **.sm:** `#NOTES:` section. Standard format: `dance-single:`, `:`, `Medium:`, `8:` (type, description, difficulty, meter). Compact format: type, difficulty, meter. Parser tries both.
+
+**Get-SongDisplayNameFromDir:** Splits `SongDir` on both `/` and `\` to extract Pack (second-to-last) and SongTitle (last). Handles Windows backslash paths.
+
+## 30-Day Meter Tables
+
+**Source:** Full `Stats.xml` files in staging (`SavePortable/LocalProfiles/*/Stats.xml`, `SaveAppData/LocalProfiles/*/Stats.xml`).
+
+**Flow:** `Get-MeterTallyFromStatsXml` parses XML, iterates `//Song` → `Steps` → `HighScoreList/HighScore` (or `Steps/HighScore`). Filters by `DateTime >= CutoffDate`. For each, calls `Get-MeterFromSongChart`. Builds `@{ PlayerName => @{ Meter => Count } }`. Skips scores when meter lookup fails.
+
+**Fallback:** When Stats.xml tally is empty (e.g. meter lookup fails for all songs), `Get-MeterTallyFromDigests` is used instead. It parses digest lines with `Parse-DigestScoreLine` (requires `Difficulty (Meter)` format) and counts scores from the last 30 digest files. Ensures charts always appear when digest data has meters.
+
+**Deduplication:** Processes SavePortable first, then SaveAppData. Skips profile IDs already processed to avoid double-counting.
+
+**Profile name:** From root `<Name>` in Stats.xml, or `"Profile " + profileId` if empty.
+
+## Stats.xml Structure
+
+```xml
+<Stats>
+  <Name>ProfileName</Name>
+  <SongScores>
+    <Song Dir="Songs/Pack/SongFolder">
+      <Steps Difficulty="Challenge" StepsType="dance-single">
+        <HighScoreList>
+          <HighScore>
+            <DateTime>2024-01-15T12:30:00</DateTime>
+            ...
+          </HighScore>
+        </HighScoreList>
+      </Steps>
+    </Song>
+  </SongScores>
+</Stats>
+```
+
+## Test Fixtures
+
+| Path | Purpose |
+|------|---------|
+| `Tests/Fixtures/Songs/TestPack/TestSong/test.ssc` | .ssc meter lookup (Challenge, meter 12) |
+| `Tests/Fixtures/Songs/TestPack/SmSong/test.sm` | .sm meter lookup (Medium, meter 8, standard format) |
+| `Tests/Fixtures/StatsStaging/ITGMania/SavePortable/LocalProfiles/00000001/Stats.xml` | Get-MeterTallyFromStatsXml test |
+| `Tests/Fixtures/sample-stats-diff.txt` | Get-NewScoreEntriesFromStatsDiff test |

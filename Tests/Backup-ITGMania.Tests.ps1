@@ -294,6 +294,37 @@ Describe 'Get-MeterFromSongChart' {
     It 'returns empty when song folder does not exist' {
         Get-MeterFromSongChart -InstallPath 'C:\nonexistent' -SongDir 'Songs\X\Y' -Difficulty 'Challenge' -StepsType 'dance-single' | Should Be ''
     }
+    It 'returns meter from .sm file with standard format (description line)' {
+        $fixturesDir = Join-Path $PSScriptRoot 'Fixtures'
+        $installPath = $fixturesDir
+        $songDir = 'Songs\TestPack\SmSong'
+        if (Test-Path (Join-Path $installPath $songDir)) {
+            $meter = Get-MeterFromSongChart -InstallPath $installPath -SongDir $songDir -Difficulty 'Medium' -StepsType 'dance-single'
+            $meter | Should Be '8'
+        }
+    }
+    It 'returns meter via pack-song fallback when direct path fails' {
+        $fixturesDir = Join-Path $PSScriptRoot 'Fixtures'
+        $installPath = $fixturesDir
+        $songDir = 'WrongPath/TestPack/TestSong'
+        $meter = Get-MeterFromSongChart -InstallPath $installPath -SongDir $songDir -Difficulty 'Challenge' -StepsType 'dance-single'
+        $meter | Should Be '12'
+    }
+}
+
+Describe 'Get-MeterTallyFromStatsXml' {
+    It 'counts all HighScores in last 30 days from Stats.xml' {
+        $fixturesDir = Join-Path $PSScriptRoot 'Fixtures'
+        $stagingDir = Join-Path $fixturesDir 'StatsStaging'
+        $installPath = $fixturesDir
+        $cutoffDate = [DateTime]::Parse('2024-01-01')
+        if (Test-Path (Join-Path $stagingDir 'ITGMania\SavePortable\LocalProfiles\00000001\Stats.xml')) {
+            $tally = Get-MeterTallyFromStatsXml -StagingDir $stagingDir -TargetSubpath 'ITGMania' -InstallPath $installPath -CutoffDate $cutoffDate
+            $tally.ContainsKey('TestPlayer') | Should Be $true
+            $tally['TestPlayer'][12] | Should Be 2
+            $tally['TestPlayer'][8] | Should Be 1
+        }
+    }
 }
 
 Describe 'Get-SongsPackListMarkdown' {

@@ -198,22 +198,91 @@ function Get-SongDisplayNameFromDir {
     param([string]$SongDir)
     if ([string]::IsNullOrWhiteSpace($SongDir)) { return @{ SongTitle = ""; Pack = "" } }
     $trimmed = $SongDir.TrimEnd('/').TrimEnd('\')
-    $parts = $trimmed -split '/' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $parts = $trimmed -split '[/\\]' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     if ($parts.Count -eq 0) { return @{ SongTitle = ""; Pack = "" } }
     $songTitle = $parts[-1]
     $pack = if ($parts.Count -gt 1) { $parts[-2] } else { "" }
     return @{ SongTitle = $songTitle; Pack = $pack }
 }
 
-function Get-MeterFromSongChart {
-    param([string]$InstallPath, [string]$SongDir, [string]$Difficulty, [string]$StepsType)
-    if ([string]::IsNullOrWhiteSpace($InstallPath) -or [string]::IsNullOrWhiteSpace($SongDir)) { return "" }
-    $songFolder = Join-Path $InstallPath ($SongDir.TrimEnd('/').TrimEnd('\'))
-    if (-not (Test-Path -LiteralPath $songFolder)) { return "" }
+function Get-AdditionalSongFolderPaths {
+    param([string]$InstallPath, [string]$SavePathPortable, [string]$SavePathAppData, [object]$Config)
+    $paths = [System.Collections.ArrayList]::new()
+    if ($Config -and $Config.AdditionalSongFolderPaths -and $Config.AdditionalSongFolderPaths.Count -gt 0) {
+        foreach ($p in $Config.AdditionalSongFolderPaths) {
+            $trimmed = $p.Trim().TrimEnd('\').TrimEnd('/')
+            if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+                $normalized = $trimmed -replace '/', [System.IO.Path]::DirectorySeparatorChar
+                if (Test-Path -LiteralPath $normalized) { [void]$paths.Add($normalized) }
+            }
+        }
+    }
+    $prefsToTry = @()
+    if (-not [string]::IsNullOrWhiteSpace($SavePathPortable)) { $prefsToTry += Join-Path $SavePathPortable "Preferences.ini" }
+    if (-not [string]::IsNullOrWhiteSpace($SavePathAppData)) { $prefsToTry += Join-Path $SavePathAppData "Preferences.ini" }
+    if (-not [string]::IsNullOrWhiteSpace($SavePathAppData)) {
+        $appDataParent = Split-Path -Parent $SavePathAppData
+        if (-not [string]::IsNullOrWhiteSpace($appDataParent)) { $prefsToTry += Join-Path $appDataParent "Preferences.ini" }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($InstallPath)) { $prefsToTry += Join-Path $InstallPath "Save\Preferences.ini" }
+    foreach ($prefPath in $prefsToTry) {
+        if (Test-Path -LiteralPath $prefPath) {
+            try {
+                $content = [System.IO.File]::ReadAllText($prefPath, [System.Text.Encoding]::UTF8)
+                if ($content -match 'AdditionalSongFolders\s*=\s*([^\r\n]+)') {
+                    $val = $matches[1].Trim()
+                    foreach ($part in ($val -split ',')) {
+                        $p = $part.Trim().TrimEnd('/').TrimEnd('\')
+                        if (-not [string]::IsNullOrWhiteSpace($p)) {
+                            $normalized = $p -replace '/', [System.IO.Path]::DirectorySeparatorChar
+                            if ($normalized -match '^[a-zA-Z]:') {
+                                if (Test-Path -LiteralPath $normalized) { [void]$paths.Add($normalized) }
+                            } else {
+                                $resolved = Join-Path $InstallPath $normalized
+                                if (Test-Path -LiteralPath $resolved) { [void]$paths.Add($resolved) }
+                            }
+                        }
+                    }
+                    break
+                }
+            } catch { }
+        }
+    }
+    return @($paths)
+}
+
+function Get-SongFolderByPackAndName {
+    param([string]$InstallPath, [string]$Pack, [string]$SongFolderName, [string[]]$AdditionalSongFolderPaths = @())
+    if ([string]::IsNullOrWhiteSpace($Pack) -or [string]::IsNullOrWhiteSpace($SongFolderName)) { return "" }
+    $roots = [System.Collections.ArrayList]::new()
+    if (-not [string]::IsNullOrWhiteSpace($InstallPath)) {
+        $songsRoot = Join-Path $InstallPath "Songs"
+        $additionalRoot = Join-Path $InstallPath "AdditionalSongs"
+        if (Test-Path -LiteralPath $songsRoot) { [void]$roots.Add($songsRoot) }
+        if (Test-Path -LiteralPath $additionalRoot) { [void]$roots.Add($additionalRoot) }
+    }
+    foreach ($p in $AdditionalSongFolderPaths) {
+        if (-not [string]::IsNullOrWhiteSpace($p) -and (Test-Path -LiteralPath $p)) { [void]$roots.Add($p) }
+    }
+    foreach ($root in $roots) {
+        $packDir = Join-Path $root $Pack
+        if (-not (Test-Path -LiteralPath $packDir)) { continue }
+        $songDirs = Get-ChildItem -LiteralPath $packDir -Directory -ErrorAction SilentlyContinue
+        foreach ($sd in $songDirs) {
+            if ($sd.Name -eq $SongFolderName) { return $sd.FullName }
+            if ($sd.Name.StartsWith($SongFolderName, [StringComparison]::OrdinalIgnoreCase)) { return $sd.FullName }
+            if ($sd.Name.IndexOf($SongFolderName, [StringComparison]::OrdinalIgnoreCase) -ge 0) { return $sd.FullName }
+        }
+    }
+    return ""
+}
+
+function Get-MeterFromSongFolder {
+    param([string]$SongFolder, [string]$Difficulty, [string]$StepsType)
+    if ([string]::IsNullOrWhiteSpace($SongFolder) -or -not (Test-Path -LiteralPath $SongFolder)) { return "" }
     $diffLower = $Difficulty.Trim().ToLowerInvariant()
     $stepsLower = $StepsType.Trim().ToLowerInvariant()
-    # Prefer .ssc (StepMania 5 format)
-    $sscFiles = @(Get-ChildItem -Path $songFolder -Filter "*.ssc" -ErrorAction SilentlyContinue)
+    $sscFiles = @(Get-ChildItem -LiteralPath $SongFolder -Filter "*.ssc" -ErrorAction SilentlyContinue)
     foreach ($f in $sscFiles) {
         try {
             $content = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
@@ -233,8 +302,7 @@ function Get-MeterFromSongChart {
             }
         } catch { }
     }
-    # Fallback to .sm format
-    $smFiles = @(Get-ChildItem -Path $songFolder -Filter "*.sm" -ErrorAction SilentlyContinue)
+    $smFiles = @(Get-ChildItem -LiteralPath $SongFolder -Filter "*.sm" -ErrorAction SilentlyContinue)
     foreach ($f in $smFiles) {
         try {
             $content = [System.IO.File]::ReadAllText($f.FullName, [System.Text.Encoding]::UTF8)
@@ -247,11 +315,20 @@ function Get-MeterFromSongChart {
                 $line = $lines[$i].Trim()
                 if ($line -match "^\s*([^:]+):\s*$") {
                     $stype = $matches[1].Trim().ToLowerInvariant()
-                    if ($stype -eq $stepsLower -and ($i + 2) -lt $lines.Count) {
-                        $diffLine = $lines[$i + 1].Trim()
-                        if ($diffLine -match "^\s*([^:]+):?\s*$" -and $matches[1].Trim().ToLowerInvariant() -eq $diffLower) {
-                            $meterLine = $lines[$i + 2].Trim()
-                            if ($meterLine -match "^\s*(\d+)\s*:?\s*$") { return $matches[1].Trim() }
+                    if ($stype -eq $stepsLower) {
+                        if (($i + 3) -lt $lines.Count) {
+                            $diffLine = $lines[$i + 2].Trim()
+                            if ($diffLine -match "^\s*([^:]+):?\s*$" -and $matches[1].Trim().ToLowerInvariant() -eq $diffLower) {
+                                $meterLine = $lines[$i + 3].Trim()
+                                if ($meterLine -match "^\s*(\d+)\s*:?\s*$") { return $matches[1].Trim() }
+                            }
+                        }
+                        if (($i + 2) -lt $lines.Count) {
+                            $diffLine = $lines[$i + 1].Trim()
+                            if ($diffLine -match "^\s*([^:]+):?\s*$" -and $matches[1].Trim().ToLowerInvariant() -eq $diffLower) {
+                                $meterLine = $lines[$i + 2].Trim()
+                                if ($meterLine -match "^\s*(\d+)\s*:?\s*$") { return $matches[1].Trim() }
+                            }
                         }
                     }
                 }
@@ -262,8 +339,40 @@ function Get-MeterFromSongChart {
     return ""
 }
 
+function Get-MeterFromSongChart {
+    param(
+        [string]$InstallPath,
+        [string]$SongDir,
+        [string]$Difficulty,
+        [string]$StepsType,
+        [string[]]$AdditionalSongFolderPaths = @()
+    )
+    if ([string]::IsNullOrWhiteSpace($InstallPath) -or [string]::IsNullOrWhiteSpace($SongDir)) { return "" }
+    $dirTrimmed = $SongDir.TrimEnd('/').TrimEnd('\')
+    $candidates = @(Join-Path $InstallPath $dirTrimmed)
+    if ($dirTrimmed -match '^AdditionalSongs[/\\]') {
+        $suffix = $dirTrimmed -replace '^AdditionalSongs[/\\]', ''
+        foreach ($addPath in $AdditionalSongFolderPaths) {
+            $candidates += Join-Path $addPath $suffix
+        }
+    }
+    if ($dirTrimmed -notmatch '^Songs[/\\]' -and $dirTrimmed -notmatch '^AdditionalSongs[/\\]') {
+        $candidates += Join-Path $InstallPath "Songs\$dirTrimmed"
+    }
+    $songFolder = $null
+    foreach ($c in $candidates) {
+        if (Test-Path -LiteralPath $c) { $songFolder = $c; break }
+    }
+    if (-not $songFolder) {
+        $display = Get-SongDisplayNameFromDir -SongDir $SongDir
+        $songFolder = Get-SongFolderByPackAndName -InstallPath $InstallPath -Pack $display.Pack -SongFolderName $display.SongTitle -AdditionalSongFolderPaths $AdditionalSongFolderPaths
+    }
+    if (-not $songFolder) { return "" }
+    return Get-MeterFromSongFolder -SongFolder $songFolder -Difficulty $Difficulty -StepsType $StepsType
+}
+
 function Get-NewScoreEntriesFromStatsDiff {
-    param([string]$DiffText, [string]$InstallPath = "")
+    param([string]$DiffText, [string]$InstallPath = "", [string[]]$AdditionalSongFolderPaths = @())
     $entries = [System.Collections.ArrayList]::new()
     if ([string]::IsNullOrWhiteSpace($DiffText)) { return @($entries) }
     $lines = $DiffText -split "`r?`n"
@@ -320,7 +429,7 @@ function Get-NewScoreEntriesFromStatsDiff {
                         }
                         $packPart = if ([string]::IsNullOrWhiteSpace($pack)) { "" } else { " (" + $pack + ")" }
                         $nameDisplay = if ([string]::IsNullOrWhiteSpace($name)) { "Player" } else { $name }
-                        $meter = Get-MeterFromSongChart -InstallPath $InstallPath -SongDir $songDir -Difficulty $difficulty -StepsType $stepsType
+                        $meter = Get-MeterFromSongChart -InstallPath $InstallPath -SongDir $songDir -Difficulty $difficulty -StepsType $stepsType -AdditionalSongFolderPaths $AdditionalSongFolderPaths
                         $difficultyDisplay = if ([string]::IsNullOrWhiteSpace($meter)) { $difficulty } else { $difficulty + " (" + $meter + ")" }
                         $entry = "**" + [string]$nameDisplay + "**" + " set a new score for **" + [string]$songTitle + "**" + $packPart + " - " + [string]$difficultyDisplay + ", " + [string]$stepsType
                         if (-not [string]::IsNullOrWhiteSpace($pctDisplay)) { $entry += " - " + $pctDisplay }
@@ -411,6 +520,64 @@ function Parse-DigestScoreLine {
     $parsedDate = [DateTime]::MinValue
     if (-not ([DateTime]::TryParseExact($dateStr, 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$parsedDate))) { return $null }
     return @{ PlayerName = $playerName; Meter = $meter; Date = $parsedDate }
+}
+
+function Get-MeterTallyFromStatsXml {
+    param(
+        [string]$StagingDir,
+        [string]$TargetSubpath,
+        [string]$InstallPath,
+        [string[]]$AdditionalSongFolderPaths = @(),
+        [DateTime]$CutoffDate
+    )
+    $tally = @{}
+    if ([string]::IsNullOrWhiteSpace($StagingDir) -or [string]::IsNullOrWhiteSpace($InstallPath)) { return $tally }
+    $basePath = Join-Path $StagingDir $TargetSubpath
+    $processedProfiles = @{}
+    foreach ($saveSub in @("SavePortable", "SaveAppData")) {
+        $profilesPath = Join-Path $basePath "$saveSub\LocalProfiles"
+        if (-not (Test-Path -LiteralPath $profilesPath)) { continue }
+        $profileDirs = Get-ChildItem -LiteralPath $profilesPath -Directory -ErrorAction SilentlyContinue
+        foreach ($profDir in $profileDirs) {
+            $profileId = $profDir.Name
+            if ($processedProfiles.ContainsKey($profileId)) { continue }
+            $statsPath = Join-Path $profDir.FullName "Stats.xml"
+            if (-not (Test-Path -LiteralPath $statsPath)) { continue }
+            try {
+                $xml = [xml](Get-Content -LiteralPath $statsPath -Raw -Encoding UTF8)
+                $profileName = $xml.Stats.Name
+                if ([string]::IsNullOrWhiteSpace($profileName)) { $profileName = "Profile " + $profileId }
+                $songs = $xml.SelectNodes("//Song")
+                foreach ($song in $songs) {
+                    $songDir = $song.GetAttribute("Dir")
+                    if ([string]::IsNullOrWhiteSpace($songDir)) { continue }
+                    $stepsNodes = $song.SelectNodes("Steps")
+                    foreach ($steps in $stepsNodes) {
+                        $difficulty = $steps.GetAttribute("Difficulty")
+                        $stepsType = $steps.GetAttribute("StepsType")
+                        $hsList = $steps.SelectSingleNode("HighScoreList")
+                        $hsNodes = if ($hsList) { $hsList.SelectNodes("HighScore") } else { $steps.SelectNodes("HighScore") }
+                        if (-not $hsNodes) { continue }
+                        foreach ($hs in $hsNodes) {
+                            $dtNode = $hs.SelectSingleNode("DateTime")
+                            if (-not $dtNode -or [string]::IsNullOrWhiteSpace($dtNode.InnerText)) { continue }
+                            $parsedDt = [DateTime]::MinValue
+                            if (-not ([DateTime]::TryParse($dtNode.InnerText.Trim(), [ref]$parsedDt))) { continue }
+                            if ($parsedDt -lt $CutoffDate) { continue }
+                            $meter = Get-MeterFromSongChart -InstallPath $InstallPath -SongDir $songDir -Difficulty $difficulty -StepsType $stepsType -AdditionalSongFolderPaths $AdditionalSongFolderPaths
+                            if ([string]::IsNullOrWhiteSpace($meter)) { continue }
+                            $m = [int]$meter
+                            if (-not $tally.ContainsKey($profileName)) { $tally[$profileName] = @{} }
+                            if (-not $tally[$profileName].ContainsKey($m)) { $tally[$profileName][$m] = 0 }
+                            $tally[$profileName][$m] += 1
+                        }
+                    }
+                }
+                $processedProfiles[$profileId] = $true
+            } catch { }
+        }
+    }
+    return $tally
 }
 
 function Get-MeterTallyFromDigests {
@@ -660,6 +827,52 @@ function Get-SongToPackMap {
         }
     }
     return $map
+}
+
+function Parse-DigestScoreLineForMeterRepair {
+    param([string]$Line)
+    if ([string]::IsNullOrWhiteSpace($Line)) { return $null }
+    $content = $Line.Trim()
+    if ($content.StartsWith('- ')) { $content = $content.Substring(2).Trim() }
+    if (-not ($content -match '^\*\*([^*]+)\*\*\s+set a new score for\s+\*\*([^*]+)\*\*\s+\(([^)]+)\)\s+-\s+([^,]+),\s+([^\s,]+)\s+-')) { return $null }
+    $player = $matches[1].Trim()
+    $songTitle = $matches[2].Trim()
+    $pack = $matches[3].Trim()
+    $difficultyPart = $matches[4].Trim()
+    $stepsType = $matches[5].Trim()
+    if ($difficultyPart -match '^\s*(.+?)\s*\((\d+)\)\s*$') { return $null }
+    return @{ Player = $player; SongTitle = $songTitle; Pack = $pack; Difficulty = $difficultyPart; StepsType = $stepsType }
+}
+
+function Repair-DigestMeters {
+    param([string]$DigestsDir, [string]$InstallPath, [string[]]$AdditionalSongFolderPaths = @())
+    if ([string]::IsNullOrWhiteSpace($DigestsDir) -or -not (Test-Path $DigestsDir)) { return }
+    if ([string]::IsNullOrWhiteSpace($InstallPath)) { return }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    $files = @(Get-ChildItem -Path $DigestsDir -Filter "*.md" -ErrorAction SilentlyContinue)
+    foreach ($f in $files) {
+        $path = $f.FullName
+        $content = [System.IO.File]::ReadAllText($path, $utf8NoBom)
+        $lines = $content -split "`r?`n"
+        $changed = $false
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            $parsed = Parse-DigestScoreLineForMeterRepair -Line $lines[$i]
+            if ($null -eq $parsed) { continue }
+            $songFolder = Get-SongFolderByPackAndName -InstallPath $InstallPath -Pack $parsed.Pack -SongFolderName $parsed.SongTitle -AdditionalSongFolderPaths $AdditionalSongFolderPaths
+            if ([string]::IsNullOrWhiteSpace($songFolder)) { continue }
+            $meter = Get-MeterFromSongFolder -SongFolder $songFolder -Difficulty $parsed.Difficulty -StepsType $parsed.StepsType
+            if ([string]::IsNullOrWhiteSpace($meter)) { continue }
+            $oldPattern = " - $($parsed.Difficulty), $($parsed.StepsType) -"
+            $newPattern = " - $($parsed.Difficulty) ($meter), $($parsed.StepsType) -"
+            $lines[$i] = $lines[$i].Replace($oldPattern, $newPattern)
+            $changed = $true
+        }
+        if ($changed) {
+            $newContent = $lines -join "`n"
+            [System.IO.File]::WriteAllText($path, $newContent, $utf8NoBom)
+            Write-Host "Repaired meters: $($f.Name)"
+        }
+    }
 }
 
 function Repair-DigestPackBlocks {
@@ -977,13 +1190,14 @@ function Invoke-Backup {
             # Collect digest entries and play-time deltas from LocalProfiles Stats.xml diffs
             $digestEntries = [System.Collections.ArrayList]::new()
             $playTimeDeltas = [System.Collections.ArrayList]::new()
+            $additionalSongPaths = @(Get-AdditionalSongFolderPaths -InstallPath $installPath -SavePathPortable $savePortable -SavePathAppData $saveAppData -Config $config)
             $statsXmlFiles = @($changedFiles | Where-Object { $_ -like '*LocalProfiles*Stats.xml' })
             foreach ($relPath in $statsXmlFiles) {
                 $perFileDiffOut = if ($hasHead) { & $gitExe diff --cached HEAD -- $relPath 2>&1 } else { & $gitExe diff --cached -- $relPath 2>&1 }
                 $perFileDiffParts = [System.Collections.ArrayList]::new()
                 if ($null -ne $perFileDiffOut) { foreach ($o in $perFileDiffOut) { $t = ""; if ($null -ne $o) { try { $t = [string]$o } catch { } }; if ($null -eq $t) { $t = "" }; [void]$perFileDiffParts.Add($t) } }
                 $perFileDiffText = ($perFileDiffParts | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ }) -join "`n"
-                $entries = Get-NewScoreEntriesFromStatsDiff -DiffText $perFileDiffText -InstallPath $installPath
+                $entries = Get-NewScoreEntriesFromStatsDiff -DiffText $perFileDiffText -InstallPath $installPath -AdditionalSongFolderPaths $additionalSongPaths
                 foreach ($e in $entries) { [void]$digestEntries.Add($e) }
                 $deltas = Get-PlayTimeDeltaFromStatsDiff -DiffText $perFileDiffText -RelPath $relPath
                 foreach ($d in $deltas) { [void]$playTimeDeltas.Add($d) }
@@ -1046,6 +1260,7 @@ function Invoke-Backup {
             }
             if (Test-Path $digestsDir) {
                 Repair-DigestPackBlocks -DigestsDir $digestsDir -InstallPath $installPath
+                Repair-DigestMeters -DigestsDir $digestsDir -InstallPath $installPath -AdditionalSongFolderPaths $additionalSongPaths
             }
             $fence = '```'
             if ([string]::IsNullOrEmpty([string]$fence)) { $fence = '```' }
@@ -1081,9 +1296,17 @@ function Invoke-Backup {
                     [void]$readmeLines.Add("### 30-day play time (in songs)")
                     [void]$readmeLines.Add("")
                     $cutoffDate = (Get-Date).AddDays(-30).Date
-                    $digestPaths = @()
-                    for ($idx = 0; $idx -lt $take; $idx++) { $digestPaths += $digestFilesForReadme[$idx].FullName }
-                    $meterTally = Get-MeterTallyFromDigests -DigestFilePaths $digestPaths -CutoffDate $cutoffDate
+                    $meterTally = Get-MeterTallyFromStatsXml -StagingDir $StagingDir -TargetSubpath $targetSubpath -InstallPath $installPath -AdditionalSongFolderPaths $additionalSongPaths -CutoffDate $cutoffDate
+                    # Fallback to digest-based tally when Stats.xml meter lookup returns empty (e.g. song paths not found)
+                    $digestPaths = @($digestFilesForReadme[0..($take - 1)] | ForEach-Object { $_.FullName })
+                    if (($meterTally.Count -eq 0 -or ($thirtyDayPlayTime.Keys | Where-Object { -not $meterTally.ContainsKey($_) -or $meterTally[$_].Count -eq 0 })) -and $digestPaths.Count -gt 0) {
+                        $digestTally = Get-MeterTallyFromDigests -DigestFilePaths $digestPaths -CutoffDate $cutoffDate
+                        foreach ($pn in $digestTally.Keys) {
+                            if (-not $meterTally.ContainsKey($pn) -or $meterTally[$pn].Count -eq 0) {
+                                $meterTally[$pn] = $digestTally[$pn]
+                            }
+                        }
+                    }
                     foreach ($pn in ($thirtyDayPlayTime.Keys | Sort-Object)) {
                         [void]$readmeLines.Add("- **" + $pn + "** " + (Format-SecondsToPlayTime -Seconds $thirtyDayPlayTime[$pn]))
                         if ($meterTally.ContainsKey($pn)) {
@@ -1255,11 +1478,18 @@ if ($MyInvocation.InvocationName -ne '.') {
             exit 1
         }
         $installPathForRepair = $null
+        $additionalPathsForRepair = @()
         try {
             $config = Get-Config
-            if ($config -and $config.InstallPath) { $installPathForRepair = $config.InstallPath.TrimEnd('\') }
+            if ($config -and $config.InstallPath) {
+                $installPathForRepair = $config.InstallPath.TrimEnd('\')
+                $savePortable = if ($config.SavePathPortable) { $config.SavePathPortable } else { Join-Path $installPathForRepair "Save" }
+                $saveAppData = if ($config.SavePathAppData) { $config.SavePathAppData } else { Join-Path $env:APPDATA "ITGmania\Save" }
+                $additionalPathsForRepair = @(Get-AdditionalSongFolderPaths -InstallPath $installPathForRepair -SavePathPortable $savePortable -SavePathAppData $saveAppData -Config $config)
+            }
         } catch { }
         Repair-DigestPackBlocks -DigestsDir $digestsDir -InstallPath $installPathForRepair
+        if ($installPathForRepair) { Repair-DigestMeters -DigestsDir $digestsDir -InstallPath $installPathForRepair -AdditionalSongFolderPaths $additionalPathsForRepair }
         exit 0
     }
     Invoke-Backup

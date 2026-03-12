@@ -54,4 +54,13 @@ Excluded: Songs, Cache, Program, Downloads.
 
 ## Digest (score history)
 
-Digest entries show new scores from Stats.xml diffs. Difficulty includes numeric meter when available (e.g. `Challenge (12)`). `Get-MeterFromSongChart` reads `.ssc`/`.sm` from the song folder at InstallPath; meter lookup only works when backup runs on the machine with the full install.
+Digest entries show new scores from Stats.xml diffs. Difficulty includes numeric meter when available (e.g. `Challenge (12)`). `Get-MeterFromSongChart` reads `.ssc`/`.sm` from the song folder at InstallPath; meter lookup only works when backup runs on the machine with the full install. For songs in `AdditionalSongs/`, paths from Preferences.ini `AdditionalSongFolders` and config `AdditionalSongFolderPaths` are also tried. When direct path fails, pack-song search fallback finds the folder by Pack/SongFolder name. The `.sm` parser supports both standard format (with description line) and compact format. `Repair-DigestMeters` adds meters to existing digest lines that lack them.
+
+## 30-day meter tables
+
+Per-player tables show songs completed at each numeric level in the last 30 days. **Source:** Full `Stats.xml` files in staging (not digest lines). `Get-MeterTallyFromStatsXml` parses `Stats/SongScores/Song/Steps/HighScoreList/HighScore`, filters by `DateTime >= cutoff`, looks up meter per score, and builds the tally. Counts ALL songs completed, not just new high scores.
+
+## See also
+
+- `.cursor/rules/digest-and-stats.mdc` – Detailed technical reference for digest, meter lookup, and Stats.xml parsing
+- `Tests/Fixtures/README.md` – Test fixture structure and usage
