@@ -54,3 +54,10 @@ alwaysApply: true
 - **Save (AppData):** `%APPDATA%\ITGmania\Save` → `SaveAppData/`
 
 Excluded: Songs, Cache, Program, Downloads.
+
+## Digest (score history)
+
+Digest entries are built from LocalProfiles Stats.xml diffs. Each new score line shows: player, song, pack, difficulty, steps type, percent DP, date.
+
+- **Meter display:** Difficulty is shown with numeric level when available, e.g. `Challenge (12)` or `Easy (3)`. `Get-MeterFromSongChart` looks up the meter from the song's `.ssc` or `.sm` file under `InstallPath` + `SongDir`. Prefers `.ssc` (StepMania 5), falls back to `.sm`. Meter lookup requires the song folder to exist on disk (backup runs on the user's machine; Songs are not backed up).
+- **Flow:** `Get-NewScoreEntriesFromStatsDiff` parses the diff, calls `Get-MeterFromSongChart` for each score, formats as `Difficulty (Meter)` when found.

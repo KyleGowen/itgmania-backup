@@ -51,3 +51,7 @@ This context is loaded automatically by Cursor via `.cursor/rules/project-contex
 - **Save (AppData):** `%APPDATA%\ITGmania\Save` → `SaveAppData/`
 
 Excluded: Songs, Cache, Program, Downloads.
+
+## Digest (score history)
+
+Digest entries show new scores from Stats.xml diffs. Difficulty includes numeric meter when available (e.g. `Challenge (12)`). `Get-MeterFromSongChart` reads `.ssc`/`.sm` from the song folder at InstallPath; meter lookup only works when backup runs on the machine with the full install.
