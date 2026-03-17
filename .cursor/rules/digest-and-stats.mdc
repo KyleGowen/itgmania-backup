@@ -18,10 +18,14 @@ flowchart LR
     end
     
     subgraph AllScores [All songs completed]
+        Upload[Save/Upload XML files] --> ParseUpload[Get-MeterTallyFromUploadFolder]
+        ParseUpload --> FilterDate1[DateTime >= cutoff]
+        FilterDate1 --> MeterLookup1[Get-MeterFromSongChart]
+        MeterLookup1 --> Tally[30-day meter table]
         Stats[Full Stats.xml] --> ParseStats[Get-MeterTallyFromStatsXml]
-        ParseStats --> FilterDate[DateTime >= cutoff]
-        FilterDate --> MeterLookup2[Get-MeterFromSongChart]
-        MeterLookup2 --> Tally[30-day meter table]
+        ParseStats --> FilterDate2[DateTime >= cutoff]
+        FilterDate2 --> MeterLookup2[Get-MeterFromSongChart]
+        Digest[Digest files] --> ParseDigest[Get-MeterTallyFromDigests]
     end
 ```
 
@@ -32,9 +36,9 @@ flowchart LR
 **Flow:**
 1. `Get-NewScoreEntriesFromStatsDiff` parses the diff for `<Song Dir="...">` blocks with `<Steps>` and `<HighScore>`.
 2. For each new score, calls `Get-MeterFromSongChart` with `SongDir`, `Difficulty`, `StepsType`.
-3. Formats as `**Player** set a new score for **Song** (Pack) - Difficulty (Meter), dance-single - X% DP on date.`
+3. Formats as `**Player** set a new score for **Song** (Pack) - Difficulty (Meter) - X% on date.`
 
-**Repair:** `Repair-DigestMeters` runs after digest write. For lines missing meters, uses `Parse-DigestScoreLineForMeterRepair` → `Get-SongFolderByPackAndName` → `Get-MeterFromSongFolder` to add meters to existing digest files.
+**Repair:** `Repair-DigestMeters` runs after digest write. For lines missing meters, uses the pack and song already printed in the digest line (`**Song** (Pack)`) to find the song folder on the machine. Flow: `Parse-DigestScoreLineForMeterRepair` extracts Pack and SongTitle from the line → `Get-SongFolderByPackAndName` searches `InstallPath\Songs`, `AdditionalSongs`, and `AdditionalSongFolderPaths` for `Pack\SongFolder` → `Get-MeterFromSongFolder` reads `.ssc` files inside and matches Difficulty + StepsType to return `#METER`. Supports both formats: new (`Difficulty - X% on date` or `Difficulty on date`) and legacy (`Difficulty, dance-single - X% DP on date` or `Difficulty, dance-single on date`).
 
 ## Meter Lookup
 
@@ -56,15 +60,15 @@ flowchart LR
 
 ## 30-Day Meter Tables
 
-**Source:** Full `Stats.xml` files in staging (`SavePortable/LocalProfiles/*/Stats.xml`, `SaveAppData/LocalProfiles/*/Stats.xml`).
+**Data flow priority:** Upload (all plays) → Stats.xml (top scores per chart) → Digests (new high scores only).
 
-**Flow:** `Get-MeterTallyFromStatsXml` parses XML, iterates `//Song` → `Steps` → `HighScoreList/HighScore` (or `Steps/HighScore`). Filters by `DateTime >= CutoffDate`. For each, calls `Get-MeterFromSongChart`. Builds `@{ PlayerName => @{ Meter => Count } }`. Skips scores when meter lookup fails.
+**Primary source – Upload folder:** StepMania writes one XML file per play to `Save/Upload/` (files named `yyyy-mm-dd nnnnn`). `Get-MeterTallyFromUploadFolder` enumerates `SavePortable/Upload/` and `SaveAppData/Upload/`, parses each file for `//HighScoreForASongAndSteps`, filters by `DateTime >= CutoffDate`, looks up meter via `Get-MeterFromSongChart`, and builds `@{ PlayerName => @{ Meter => Count } }`. Counts **all plays**, not just top scores. Player identification: `Name` from HighScore, or `PlayerGuid` mapped to profile name via `Get-PlayerGuidToNameMap` (reads `GeneralData/Guid` from LocalProfiles Stats.xml). Skips files by `LastWriteTime < CutoffDate` before parsing.
 
-**Fallback:** When Stats.xml tally is empty (e.g. meter lookup fails for all songs), `Get-MeterTallyFromDigests` is used instead. It parses digest lines with `Parse-DigestScoreLine` (requires `Difficulty (Meter)` format) and counts scores from the last 30 digest files. Ensures charts always appear when digest data has meters.
+**Fallback – Stats.xml:** `Get-MeterTallyFromStatsXml` parses `SavePortable/LocalProfiles/*/Stats.xml` and `SaveAppData/LocalProfiles/*/Stats.xml`. Iterates `//Song` → `Steps` → `HighScoreList/HighScore`. Filters by `DateTime >= CutoffDate`. StepMania stores only the top N scores per chart, so this is not all plays.
 
-**Deduplication:** Processes SavePortable first, then SaveAppData. Skips profile IDs already processed to avoid double-counting.
+**Fallback – Digests:** When both Upload and Stats.xml return empty for a player, `Get-MeterTallyFromDigests` parses digest lines (requires `Difficulty (Meter)` format) from the last 30 digest files. Counts new high scores only.
 
-**Profile name:** From root `<Name>` in Stats.xml, or `"Profile " + profileId` if empty.
+**Profile name:** From `Name` in HighScore (Upload), root `<Name>` in Stats.xml, or `"Profile " + profileId` if empty.
 
 ## Stats.xml Structure
 
@@ -86,6 +90,25 @@ flowchart LR
 </Stats>
 ```
 
+## Upload XML Structure
+
+```xml
+<Stats>
+  <RecentSongScores>
+    <HighScoreForASongAndSteps>
+      <Song Dir="Songs/Pack/SongFolder"/>
+      <Steps Difficulty="Challenge" StepsType="dance-single"/>
+      <HighScore>
+        <Name>PlayerName</Name>
+        <DateTime>2024-01-15T12:30:00</DateTime>
+        <PlayerGuid>optional-profile-guid</PlayerGuid>
+        ...
+      </HighScore>
+    </HighScoreForASongAndSteps>
+  </RecentSongScores>
+</Stats>
+```
+
 ## Test Fixtures
 
 | Path | Purpose |
@@ -93,4 +116,5 @@ flowchart LR
 | `Tests/Fixtures/Songs/TestPack/TestSong/test.ssc` | .ssc meter lookup (Challenge, meter 12) |
 | `Tests/Fixtures/Songs/TestPack/SmSong/test.sm` | .sm meter lookup (Medium, meter 8, standard format) |
 | `Tests/Fixtures/StatsStaging/ITGMania/SavePortable/LocalProfiles/00000001/Stats.xml` | Get-MeterTallyFromStatsXml test |
+| `Tests/Fixtures/StatsStaging/ITGMania/SavePortable/Upload/*.xml` | Get-MeterTallyFromUploadFolder test (one file per play) |
 | `Tests/Fixtures/sample-stats-diff.txt` | Get-NewScoreEntriesFromStatsDiff test |

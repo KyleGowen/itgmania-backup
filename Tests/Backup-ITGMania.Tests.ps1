@@ -114,7 +114,7 @@ Describe 'Parse-PlayTimeLine' {
 
     Describe 'Parse-DigestScoreLine' {
     It 'parses valid score line' {
-        $r = Parse-DigestScoreLine -Line '**TestPlayer** set a new score for **Song** (TestPack) - Challenge (12), dance-single on 2024-01-15.'
+        $r = Parse-DigestScoreLine -Line '**TestPlayer** set a new score for **Song** (TestPack) - Challenge (12) on 2024-01-15.'
         $r | Should Not Be $null
         $r.PlayerName | Should Be 'TestPlayer'
         $r.Meter | Should Be 12
@@ -131,6 +131,38 @@ Describe 'Parse-PlayTimeLine' {
         Parse-DigestScoreLine -Line 'no bold' | Should Be $null
         Parse-DigestScoreLine -Line '**Player** no meter' | Should Be $null
         Parse-DigestScoreLine -Line '' | Should Be $null
+    }
+}
+
+Describe 'Parse-DigestScoreLineForMeterRepair' {
+    It 'parses line with percent DP' {
+        $line = '- **TestPlayer** set a new score for **TestSong** (TestPack) - Challenge - 95.50% on 2024-01-15.'
+        $r = Parse-DigestScoreLineForMeterRepair -Line $line
+        $r | Should Not Be $null
+        $r.Player | Should Be 'TestPlayer'
+        $r.SongTitle | Should Be 'TestSong'
+        $r.Pack | Should Be 'TestPack'
+        $r.Difficulty | Should Be 'Challenge'
+        $r.StepsType | Should Be 'dance-single'
+    }
+    It 'parses line without percent' {
+        $line = '- **OtherPlayer** set a new score for **AnotherSong** (SomePack) - Hard on 2024-01-14.'
+        $r = Parse-DigestScoreLineForMeterRepair -Line $line
+        $r | Should Not Be $null
+        $r.Player | Should Be 'OtherPlayer'
+        $r.SongTitle | Should Be 'AnotherSong'
+        $r.Pack | Should Be 'SomePack'
+        $r.Difficulty | Should Be 'Hard'
+        $r.StepsType | Should Be 'dance-single'
+    }
+    It 'returns null when line already has meter' {
+        $line = '- **Player** set a new score for **Song** (Pack) - Challenge (12) - 90% on 2024-01-15.'
+        Parse-DigestScoreLineForMeterRepair -Line $line | Should Be $null
+    }
+    It 'returns null for invalid line' {
+        Parse-DigestScoreLineForMeterRepair -Line 'no bold' | Should Be $null
+        Parse-DigestScoreLineForMeterRepair -Line '' | Should Be $null
+        Parse-DigestScoreLineForMeterRepair -Line $null | Should Be $null
     }
 }
 
@@ -323,6 +355,33 @@ Describe 'Get-MeterTallyFromStatsXml' {
             $tally.ContainsKey('TestPlayer') | Should Be $true
             $tally['TestPlayer'][12] | Should Be 2
             $tally['TestPlayer'][8] | Should Be 1
+        }
+    }
+}
+
+Describe 'Get-MeterTallyFromUploadFolder' {
+    It 'counts all plays from Upload folder in last 30 days' {
+        $fixturesDir = Join-Path $PSScriptRoot 'Fixtures'
+        $stagingDir = Join-Path $fixturesDir 'StatsStaging'
+        $installPath = $fixturesDir
+        $cutoffDate = [DateTime]::Parse('2024-01-01')
+        $uploadPath = Join-Path $stagingDir 'ITGMania\SavePortable\Upload'
+        if (Test-Path $uploadPath) {
+            $tally = Get-MeterTallyFromUploadFolder -StagingDir $stagingDir -TargetSubpath 'ITGMania' -InstallPath $installPath -CutoffDate $cutoffDate
+            $tally.ContainsKey('TestPlayer') | Should Be $true
+            $tally['TestPlayer'][12] | Should Be 2
+            $tally['TestPlayer'][8] | Should Be 1
+        }
+    }
+    It 'skips files older than cutoff' {
+        $fixturesDir = Join-Path $PSScriptRoot 'Fixtures'
+        $stagingDir = Join-Path $fixturesDir 'StatsStaging'
+        $installPath = $fixturesDir
+        $cutoffDate = [DateTime]::Parse('2025-01-01')
+        $uploadPath = Join-Path $stagingDir 'ITGMania\SavePortable\Upload'
+        if (Test-Path $uploadPath) {
+            $tally = Get-MeterTallyFromUploadFolder -StagingDir $stagingDir -TargetSubpath 'ITGMania' -InstallPath $installPath -CutoffDate $cutoffDate
+            $tally.Count | Should Be 0
         }
     }
 }

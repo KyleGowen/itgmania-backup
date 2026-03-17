@@ -39,6 +39,10 @@ alwaysApply: true
 - **`Logs/`** – Backup logs (when run from script dir)
 - **`backup-repo-clone/`** – Likely a local clone of the backup destination (not part of the backup flow)
 
+## Scheduled task (overnight backups)
+
+The installer creates a Windows Task Scheduler task that runs **CronRunner.ps1 every minute**. CronRunner checks the cron schedule (e.g. `0 3 * * *` = 3 AM daily) and runs the backup when it matches. The task uses `-WakeToRun` so the PC can wake from sleep to run overnight backups. Re-run the installer if the task points to a wrong path (e.g. a deleted temp folder).
+
 ## Important constraints
 
 1. **Never backup Songs** – Excluded by design; do not enable for GitHub.
@@ -67,7 +71,8 @@ Digest entries are built from LocalProfiles Stats.xml diffs. Each new score line
 
 - **Meter display:** Difficulty is shown with numeric level when available, e.g. `Challenge (12)` or `Easy (3)`. `Get-MeterFromSongChart` looks up the meter from the song's `.ssc` or `.sm` file under `InstallPath` + `SongDir`. Prefers `.ssc` (StepMania 5), falls back to `.sm`. Meter lookup requires the song folder to exist on disk (backup runs on the user's machine; Songs are not backed up). For songs in `AdditionalSongs/`, the script also checks paths from `AdditionalSongFolders` in Preferences.ini and from `AdditionalSongFolderPaths` in config.json. When direct path fails, `Get-SongFolderByPackAndName` searches for Pack/SongFolder across all song roots. The `.sm` parser supports both standard format (type, description, difficulty, meter) and compact format (type, difficulty, meter).
 - **Flow:** `Get-NewScoreEntriesFromStatsDiff` parses the diff, calls `Get-MeterFromSongChart` for each score, formats as `Difficulty (Meter)` when found.
-- **30-day meter tables:** Per-player tables show songs played at each numeric level in the last 30 calendar days. One table per player, placed after that player's play time total. Uses `Get-MeterTallyFromStatsXml` (parses full Stats.xml from staging) to count ALL songs completed, not just new high scores. Uses `Format-MeterTallyForPlayerAsMarkdown`.
+- **Repair-DigestMeters:** Uses pack and song from the digest line to find the song folder on disk and add meters. `Parse-DigestScoreLineForMeterRepair` matches new format (`Difficulty - X% on date`) and legacy (`Difficulty, dance-single - X% DP on date`).
+- **30-day meter tables:** Per-player tables show songs played at each numeric level in the last 30 calendar days. One table per player, placed after that player's play time total. Primary source: `Get-MeterTallyFromUploadFolder` (Save/Upload XML files, one per play—counts ALL plays). Fallback: `Get-MeterTallyFromStatsXml` (Stats.xml, top scores per chart), then `Get-MeterTallyFromDigests`. Uses `Format-MeterTallyForPlayerAsMarkdown`.
 
 ## Change documentation
 

@@ -13,12 +13,17 @@ Fixtures used by Pester tests in `Tests/Backup-ITGMania.Tests.ps1`.
 | `Songs/TestPack/TestSong/test.ssc` | .ssc chart (Challenge, meter 12) for Get-MeterFromSongChart |
 | `Songs/TestPack/SmSong/test.sm` | .sm chart (Medium, meter 8, standard format with description line) |
 | `StatsStaging/ITGMania/SavePortable/LocalProfiles/00000001/Stats.xml` | Full Stats.xml for Get-MeterTallyFromStatsXml |
+| `StatsStaging/ITGMania/SavePortable/Upload/*.xml` | Upload XML files (one per play) for Get-MeterTallyFromUploadFolder |
 
 ## Meter Lookup Tests
 
 - **Direct path:** `Songs\TestPack\TestSong` – InstallPath is Fixtures dir
 - **Pack-song fallback:** `WrongPath/TestPack/TestSong` – direct path fails, fallback finds TestPack/TestSong
 - **.sm format:** SmSong uses standard format (type, description, difficulty, meter)
+
+## Upload Fixture
+
+The Upload folder `StatsStaging/ITGMania/SavePortable/Upload/` contains XML files named `yyyy-mm-dd nnnnn.xml`. Each file has one `HighScoreForASongAndSteps` with Song Dir, Steps Difficulty/StepsType, and HighScore (Name, DateTime). Used by Get-MeterTallyFromUploadFolder to count all plays (not just top scores).
 
 ## Stats.xml Fixture
 

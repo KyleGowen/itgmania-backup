@@ -419,8 +419,8 @@ function Get-NewScoreEntriesFromStatsDiff {
                         if (-not [string]::IsNullOrWhiteSpace($percentDp)) {
                             $pctNum = 0.0
                             if ([double]::TryParse($percentDp, [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$pctNum)) {
-                                $pctDisplay = ([math]::Round($pctNum * 100, 2)).ToString("0.00") + "% DP"
-                            } else { $pctDisplay = $percentDp + " DP" }
+                                $pctDisplay = ([math]::Round($pctNum * 100, 2)).ToString("0.00") + "%"
+                            } else { $pctDisplay = $percentDp }
                         }
                         $dateDisplay = ""
                         if (-not [string]::IsNullOrWhiteSpace($dateTime)) {
@@ -431,7 +431,7 @@ function Get-NewScoreEntriesFromStatsDiff {
                         $nameDisplay = if ([string]::IsNullOrWhiteSpace($name)) { "Player" } else { $name }
                         $meter = Get-MeterFromSongChart -InstallPath $InstallPath -SongDir $songDir -Difficulty $difficulty -StepsType $stepsType -AdditionalSongFolderPaths $AdditionalSongFolderPaths
                         $difficultyDisplay = if ([string]::IsNullOrWhiteSpace($meter)) { $difficulty } else { $difficulty + " (" + $meter + ")" }
-                        $entry = "**" + [string]$nameDisplay + "**" + " set a new score for **" + [string]$songTitle + "**" + $packPart + " - " + [string]$difficultyDisplay + ", " + [string]$stepsType
+                        $entry = "**" + [string]$nameDisplay + "**" + " set a new score for **" + [string]$songTitle + "**" + $packPart + " - " + [string]$difficultyDisplay
                         if (-not [string]::IsNullOrWhiteSpace($pctDisplay)) { $entry += " - " + $pctDisplay }
                         $entry += $dateDisplay + "."
                         [void]$entries.Add($entry)
@@ -574,6 +574,92 @@ function Get-MeterTallyFromStatsXml {
                     }
                 }
                 $processedProfiles[$profileId] = $true
+            } catch { }
+        }
+    }
+    return $tally
+}
+
+function Get-PlayerGuidToNameMap {
+    param([string]$StagingDir, [string]$TargetSubpath)
+    $map = @{}
+    if ([string]::IsNullOrWhiteSpace($StagingDir) -or [string]::IsNullOrWhiteSpace($TargetSubpath)) { return $map }
+    $basePath = Join-Path $StagingDir $TargetSubpath
+    foreach ($saveSub in @("SavePortable", "SaveAppData")) {
+        $profilesPath = Join-Path $basePath "$saveSub\LocalProfiles"
+        if (-not (Test-Path -LiteralPath $profilesPath)) { continue }
+        $profileDirs = Get-ChildItem -LiteralPath $profilesPath -Directory -ErrorAction SilentlyContinue
+        foreach ($profDir in $profileDirs) {
+            $statsPath = Join-Path $profDir.FullName "Stats.xml"
+            if (-not (Test-Path -LiteralPath $statsPath)) { continue }
+            try {
+                $xml = [xml](Get-Content -LiteralPath $statsPath -Raw -Encoding UTF8)
+                $profileName = $xml.Stats.Name
+                if ([string]::IsNullOrWhiteSpace($profileName)) { $profileName = "Profile " + $profDir.Name }
+                $guidNode = $xml.SelectSingleNode("//GeneralData/Guid")
+                if ($guidNode -and -not [string]::IsNullOrWhiteSpace($guidNode.InnerText)) {
+                    $map[$guidNode.InnerText.Trim()] = $profileName
+                }
+            } catch { }
+        }
+    }
+    return $map
+}
+
+function Get-MeterTallyFromUploadFolder {
+    param(
+        [string]$StagingDir,
+        [string]$TargetSubpath,
+        [string]$InstallPath,
+        [string[]]$AdditionalSongFolderPaths = @(),
+        [DateTime]$CutoffDate
+    )
+    $tally = @{}
+    if ([string]::IsNullOrWhiteSpace($StagingDir) -or [string]::IsNullOrWhiteSpace($InstallPath)) { return $tally }
+    $basePath = Join-Path $StagingDir $TargetSubpath
+    $guidToName = Get-PlayerGuidToNameMap -StagingDir $StagingDir -TargetSubpath $TargetSubpath
+    foreach ($saveSub in @("SavePortable", "SaveAppData")) {
+        $uploadPath = Join-Path $basePath "$saveSub\Upload"
+        if (-not (Test-Path -LiteralPath $uploadPath)) { continue }
+        $files = Get-ChildItem -LiteralPath $uploadPath -Filter "*.xml" -File -ErrorAction SilentlyContinue
+        foreach ($f in $files) {
+            if ($f.LastWriteTime -lt $CutoffDate) { continue }
+            try {
+                $xml = [xml](Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8)
+                $entries = $xml.SelectNodes("//HighScoreForASongAndSteps")
+                if (-not $entries) { continue }
+                foreach ($entry in $entries) {
+                    $songNode = $entry.SelectSingleNode("Song")
+                    $stepsNode = $entry.SelectSingleNode("Steps")
+                    $hsNode = $entry.SelectSingleNode("HighScore")
+                    if (-not $songNode -or -not $stepsNode -or -not $hsNode) { continue }
+                    $songDir = $songNode.GetAttribute("Dir")
+                    if ([string]::IsNullOrWhiteSpace($songDir)) { continue }
+                    $difficulty = $stepsNode.GetAttribute("Difficulty")
+                    $stepsType = $stepsNode.GetAttribute("StepsType")
+                    $dtNode = $hsNode.SelectSingleNode("DateTime")
+                    if (-not $dtNode -or [string]::IsNullOrWhiteSpace($dtNode.InnerText)) { continue }
+                    $parsedDt = [DateTime]::MinValue
+                    if (-not ([DateTime]::TryParse($dtNode.InnerText.Trim(), [ref]$parsedDt))) { continue }
+                    if ($parsedDt -lt $CutoffDate) { continue }
+                    $meter = Get-MeterFromSongChart -InstallPath $InstallPath -SongDir $songDir -Difficulty $difficulty -StepsType $stepsType -AdditionalSongFolderPaths $AdditionalSongFolderPaths
+                    if ([string]::IsNullOrWhiteSpace($meter)) { continue }
+                    $m = [int]$meter
+                    $nameNode = $hsNode.SelectSingleNode("Name")
+                    $guidNode = $hsNode.SelectSingleNode("PlayerGuid")
+                    $playerName = ""
+                    if ($nameNode -and -not [string]::IsNullOrWhiteSpace($nameNode.InnerText)) {
+                        $playerName = $nameNode.InnerText.Trim()
+                    }
+                    if ([string]::IsNullOrWhiteSpace($playerName) -and $guidNode -and -not [string]::IsNullOrWhiteSpace($guidNode.InnerText)) {
+                        $guid = $guidNode.InnerText.Trim()
+                        if ($guidToName.ContainsKey($guid)) { $playerName = $guidToName[$guid] }
+                    }
+                    if ([string]::IsNullOrWhiteSpace($playerName)) { $playerName = "Player" }
+                    if (-not $tally.ContainsKey($playerName)) { $tally[$playerName] = @{} }
+                    if (-not $tally[$playerName].ContainsKey($m)) { $tally[$playerName][$m] = 0 }
+                    $tally[$playerName][$m] += 1
+                }
             } catch { }
         }
     }
@@ -834,12 +920,19 @@ function Parse-DigestScoreLineForMeterRepair {
     if ([string]::IsNullOrWhiteSpace($Line)) { return $null }
     $content = $Line.Trim()
     if ($content.StartsWith('- ')) { $content = $content.Substring(2).Trim() }
-    if (-not ($content -match '^\*\*([^*]+)\*\*\s+set a new score for\s+\*\*([^*]+)\*\*\s+\(([^)]+)\)\s+-\s+([^,]+),\s+([^\s,]+)\s+-')) { return $null }
+    if (-not ($content -match '^\*\*([^*]+)\*\*\s+set a new score for\s+\*\*([^*]+)\*\*\s+\(([^)]+)\)\s+-\s+(.+?)\s+on\s')) { return $null }
     $player = $matches[1].Trim()
     $songTitle = $matches[2].Trim()
     $pack = $matches[3].Trim()
-    $difficultyPart = $matches[4].Trim()
-    $stepsType = $matches[5].Trim()
+    $rest = $matches[4].Trim()
+    $difficultyPart = ""
+    $stepsType = "dance-single"
+    if ($rest -match '^([^,]+),\s*([^\s,]+)\s*(?:-\s|$)') {
+        $difficultyPart = $matches[1].Trim()
+        $stepsType = $matches[2].Trim()
+    } elseif ($rest -match '^([^\s\-]+)\s*(?:-\s|$)') {
+        $difficultyPart = $matches[1].Trim()
+    } else { return $null }
     if ($difficultyPart -match '^\s*(.+?)\s*\((\d+)\)\s*$') { return $null }
     return @{ Player = $player; SongTitle = $songTitle; Pack = $pack; Difficulty = $difficultyPart; StepsType = $stepsType }
 }
@@ -862,9 +955,24 @@ function Repair-DigestMeters {
             if ([string]::IsNullOrWhiteSpace($songFolder)) { continue }
             $meter = Get-MeterFromSongFolder -SongFolder $songFolder -Difficulty $parsed.Difficulty -StepsType $parsed.StepsType
             if ([string]::IsNullOrWhiteSpace($meter)) { continue }
-            $oldPattern = " - $($parsed.Difficulty), $($parsed.StepsType) -"
-            $newPattern = " - $($parsed.Difficulty) ($meter), $($parsed.StepsType) -"
-            $lines[$i] = $lines[$i].Replace($oldPattern, $newPattern)
+            $newPattern = " - $($parsed.Difficulty) ($meter)"
+            $lineContent = $lines[$i]
+            $replaced = $false
+            if ($lineContent -match " - $([regex]::Escape($parsed.Difficulty)), $([regex]::Escape($parsed.StepsType)) - ") {
+                $lines[$i] = $lineContent -replace " - $([regex]::Escape($parsed.Difficulty)), $([regex]::Escape($parsed.StepsType)) - ", "$newPattern - "
+                $replaced = $true
+            } elseif ($lineContent -match " - $([regex]::Escape($parsed.Difficulty)), $([regex]::Escape($parsed.StepsType)) on") {
+                $lines[$i] = $lineContent -replace " - $([regex]::Escape($parsed.Difficulty)), $([regex]::Escape($parsed.StepsType)) on", "$newPattern on"
+                $replaced = $true
+            } elseif ($lineContent -match " - $([regex]::Escape($parsed.Difficulty)) - ") {
+                $lines[$i] = $lineContent -replace " - $([regex]::Escape($parsed.Difficulty)) - ", "$newPattern - "
+                $replaced = $true
+            } elseif ($lineContent -match " - $([regex]::Escape($parsed.Difficulty)) on") {
+                $lines[$i] = $lineContent -replace " - $([regex]::Escape($parsed.Difficulty)) on", "$newPattern on"
+                $replaced = $true
+            }
+            if (-not $replaced) { continue }
+            $lines[$i] = $lines[$i] -replace '\s+%\s+DP\b', ' %'
             $changed = $true
         }
         if ($changed) {
@@ -1296,8 +1404,15 @@ function Invoke-Backup {
                     [void]$readmeLines.Add("### 30-day play time (in songs)")
                     [void]$readmeLines.Add("")
                     $cutoffDate = (Get-Date).AddDays(-30).Date
-                    $meterTally = Get-MeterTallyFromStatsXml -StagingDir $StagingDir -TargetSubpath $targetSubpath -InstallPath $installPath -AdditionalSongFolderPaths $additionalSongPaths -CutoffDate $cutoffDate
-                    # Fallback to digest-based tally when Stats.xml meter lookup returns empty (e.g. song paths not found)
+                    $meterTally = Get-MeterTallyFromUploadFolder -StagingDir $StagingDir -TargetSubpath $targetSubpath -InstallPath $installPath -AdditionalSongFolderPaths $additionalSongPaths -CutoffDate $cutoffDate
+                    if ($meterTally.Count -eq 0 -or ($thirtyDayPlayTime.Keys | Where-Object { -not $meterTally.ContainsKey($_) -or $meterTally[$_].Count -eq 0 })) {
+                        $statsTally = Get-MeterTallyFromStatsXml -StagingDir $StagingDir -TargetSubpath $targetSubpath -InstallPath $installPath -AdditionalSongFolderPaths $additionalSongPaths -CutoffDate $cutoffDate
+                        foreach ($pn in $statsTally.Keys) {
+                            if (-not $meterTally.ContainsKey($pn) -or $meterTally[$pn].Count -eq 0) {
+                                $meterTally[$pn] = $statsTally[$pn]
+                            }
+                        }
+                    }
                     $digestPaths = @($digestFilesForReadme[0..($take - 1)] | ForEach-Object { $_.FullName })
                     if (($meterTally.Count -eq 0 -or ($thirtyDayPlayTime.Keys | Where-Object { -not $meterTally.ContainsKey($_) -or $meterTally[$_].Count -eq 0 })) -and $digestPaths.Count -gt 0) {
                         $digestTally = Get-MeterTallyFromDigests -DigestFilePaths $digestPaths -CutoffDate $cutoffDate

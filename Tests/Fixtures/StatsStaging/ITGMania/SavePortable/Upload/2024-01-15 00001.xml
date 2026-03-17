@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Stats>
+  <RecentSongScores>
+    <HighScoreForASongAndSteps>
+      <Song Dir="Songs/TestPack/TestSong"/>
+      <Steps Difficulty="Challenge" StepsType="dance-single"/>
+      <HighScore>
+        <Name>TestPlayer</Name>
+        <DateTime>2024-01-15T12:30:00</DateTime>
+        <PercentDP>0.955</PercentDP>
+        <Grade>A</Grade>
+      </HighScore>
+    </HighScoreForASongAndSteps>
+  </RecentSongScores>
+</Stats>

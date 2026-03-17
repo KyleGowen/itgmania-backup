@@ -58,7 +58,7 @@ Digest entries show new scores from Stats.xml diffs. Difficulty includes numeric
 
 ## 30-day meter tables
 
-Per-player tables show songs completed at each numeric level in the last 30 days. **Source:** Full `Stats.xml` files in staging (not digest lines). `Get-MeterTallyFromStatsXml` parses `Stats/SongScores/Song/Steps/HighScoreList/HighScore`, filters by `DateTime >= cutoff`, looks up meter per score, and builds the tally. Counts ALL songs completed, not just new high scores.
+Per-player tables show songs played at each numeric level in the last 30 days. **Data flow:** Upload (all plays) → Stats.xml (top scores per chart) → Digests (new high scores only). `Get-MeterTallyFromUploadFolder` parses `Save/Upload/` XML files (one per play) for `HighScoreForASongAndSteps`, filters by `DateTime >= cutoff`, and counts ALL plays. Falls back to `Get-MeterTallyFromStatsXml` (Stats.xml) when Upload is empty; `Get-MeterTallyFromDigests` when both are empty.
 
 ## See also
 
